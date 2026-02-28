@@ -1,0 +1,13 @@
+{
+  "name": "pi-memory",
+  "version": "0.1.0",
+  "description": "Persistent memory for Pi Agent — remembers user preferences, project decisions, and conventions across sessions",
+  "keywords": ["pi-package"],
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@sinclair/typebox": "*"
+  },
+  "pi": {
+    "extensions": ["./extensions"]
+  }
+}
