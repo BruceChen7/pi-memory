@@ -1,189 +1,114 @@
-import { Type } from '@sinclair/typebox';
-import type { ExtensionAPI, ExtensionContext, BeforeAgentStartEvent, AgentEndEvent, BeforeAgentStartEventResult } from '@mariozechner/pi-coding-agent';
-import { MemoryManager } from '../src/memory-manager';
-import { extractMemoriesInBackground } from '../src/extraction';
-import { callCheapModel } from '../src/cheap-model';
-import { loadConfig } from '../src/config';
+import type {
+	AgentEndEvent,
+	BeforeAgentStartEvent,
+	BeforeAgentStartEventResult,
+	ExtensionAPI,
+	ExtensionCommandContext,
+	ExtensionContext,
+} from "@mariozechner/pi-coding-agent";
+import type { AutocompleteItem } from "@mariozechner/pi-tui";
+import { Type } from "@sinclair/typebox";
+import { callCheapModel } from "../src/cheap-model";
+import { loadConfig } from "../src/config";
+import { extractMemoriesInBackground } from "../src/extraction";
+import { MemoryManager } from "../src/memory-manager";
 
 const memoryManager = new MemoryManager();
 
-let lastUserPrompt = '';
+let lastUserPrompt = "";
 
-export default function (pi: ExtensionAPI) {
+function parseMemoryExtractArgs(args: string): {
+	scope?: "global" | "project";
+	category?: string;
+} {
+	const trimmed = args.trim();
+	if (!trimmed) return {};
 
-  // ─── System prompt injection ────────────────────────────────────────
-  pi.on('before_agent_start', async (event: BeforeAgentStartEvent, ctx: ExtensionContext): Promise<BeforeAgentStartEventResult | void> => {
-    lastUserPrompt = event.prompt;
+	const tokens = trimmed.split(/\s+/);
+	let scope: "global" | "project" | undefined;
+	let category: string | undefined;
 
-    const memoryContext = await memoryManager.getMemoryContext(ctx.cwd);
-    if (!memoryContext) return;
+	for (let i = 0; i < tokens.length; i++) {
+		const token = tokens[i];
 
-    return {
-      systemPrompt: event.systemPrompt + '\n\n' + memoryContext,
-    };
-  });
+		if (token === "global" || token === "project") {
+			scope = token;
+			continue;
+		}
 
-  // ─── Auto-extraction after agent response ───────────────────────────
-  pi.on('agent_end', async (event: AgentEndEvent, ctx: ExtensionContext) => {
-    const messages = event.messages;
-    if (messages.length === 0) return;
+		if (token === "--scope" && i + 1 < tokens.length) {
+			const value = tokens[++i];
+			if (value === "global" || value === "project") scope = value;
+			continue;
+		}
 
-    const lastMessage = messages[messages.length - 1];
-    let agentResponseText = '';
-    if ('content' in lastMessage && Array.isArray(lastMessage.content)) {
-      for (const block of lastMessage.content) {
-        if (typeof block === 'string') {
-          agentResponseText += block;
-        } else if (block && typeof block === 'object' && 'text' in block) {
-          agentResponseText += (block as { text: string }).text;
-        }
-      }
-    }
+		if (token.startsWith("scope=")) {
+			const value = token.slice("scope=".length);
+			if (value === "global" || value === "project") scope = value;
+			continue;
+		}
 
-    if (!agentResponseText || !lastUserPrompt) return;
+		if (token === "--category" && i + 1 < tokens.length) {
+			category = tokens
+				.slice(i + 1)
+				.join(" ")
+				.trim();
+			break;
+		}
 
-    extractMemoriesInBackground({
-      projectPath: ctx.cwd,
-      userMessage: lastUserPrompt,
-      agentResponseText,
-      memoryManager,
-      modelRegistry: ctx.modelRegistry,
-      cwd: ctx.cwd,
-    }).catch(() => {});
-  });
+		if (token.startsWith("category=")) {
+			category = token.slice("category=".length).trim();
+		}
+	}
 
-  // ─── memory_read ────────────────────────────────────────────────────
-  pi.registerTool({
-    name: 'memory_read',
-    label: 'Memory',
-    description:
-      'Read stored memories. Returns global and project memory contents. Use to check what has already been remembered before adding new entries.',
-    parameters: Type.Object({
-      scope: Type.Optional(
-        Type.Union(
-          [Type.Literal('all'), Type.Literal('global'), Type.Literal('project')],
-          { description: 'Which memories to read. Default: all' }
-        )
-      ),
-    }),
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const scope = params.scope ?? 'all';
-      const files = await memoryManager.getMemoryFiles(ctx.cwd);
-      const sections: string[] = [];
+	return { scope, category };
+}
 
-      if ((scope === 'all' || scope === 'global') && files.global) {
-        sections.push(`## Global Memory\n${files.global}`);
-      }
-      if ((scope === 'all' || scope === 'project') && files.projectShared) {
-        sections.push(`## Project Memory\n${files.projectShared}`);
-      }
+async function runMemoryExtract(
+	params: { scope?: "global" | "project"; category?: string },
+	ctx: ExtensionContext | ExtensionCommandContext,
+	signal?: AbortSignal,
+): Promise<string> {
+	const scope = params.scope ?? "project";
+	const category = params.category ?? "General";
 
-      const text = sections.length > 0 ? sections.join('\n\n') : 'No memories stored.';
-      return { content: [{ type: 'text', text }], details: undefined };
-    },
-  });
+	// Get session messages from the current session
+	const entries = ctx.sessionManager.getEntries();
+	const messageEntries = entries.filter((e) => e.type === "message");
 
-  // ─── memory_add ─────────────────────────────────────────────────────
-  pi.registerTool({
-    name: 'memory_add',
-    label: 'Memory',
-    description:
-      'Save a memory entry. Use for user preferences, project decisions, conventions, and facts worth remembering across sessions. Avoid one-time task details.',
-    parameters: Type.Object({
-      text: Type.String({ description: 'The memory to save — one concise line' }),
-      scope: Type.Optional(
-        Type.Union(
-          [Type.Literal('global'), Type.Literal('project')],
-          { description: 'global = all projects, project = this project only. Default: project' }
-        )
-      ),
-      category: Type.Optional(
-        Type.String({ description: 'Category heading, e.g. "User Preferences", "Technical Context", "Decisions". Default: General' })
-      ),
-    }),
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const scope = params.scope ?? 'project';
-      const category = params.category ?? 'General';
-      await memoryManager.appendMemory(params.text, scope, ctx.cwd, category);
-      const text = `Saved to ${scope} memory under "${category}": ${params.text}`;
-      return { content: [{ type: 'text', text }], details: undefined };
-    },
-  });
+	if (messageEntries.length === 0) {
+		return "No messages in session to extract memories from.";
+	}
 
-  // ─── memory_remove ──────────────────────────────────────────────────
-  pi.registerTool({
-    name: 'memory_remove',
-    label: 'Memory',
-    description:
-      'Remove a memory entry by matching its text. Use when a memory is outdated, wrong, or the user asks to forget something.',
-    parameters: Type.Object({
-      text: Type.String({ description: 'Text to match against existing memories (case-insensitive partial match)' }),
-    }),
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const removed = await memoryManager.removeMemory(params.text, ctx.cwd);
-      const text = removed
-        ? `Removed memory matching: ${params.text}`
-        : `No memory found matching: ${params.text}`;
-      return { content: [{ type: 'text', text }], details: undefined };
-    },
-  });
+	// Build conversation text from session messages
+	const conversationParts: string[] = [];
+	for (const entry of messageEntries) {
+		if ("message" in entry && entry.message.role && entry.message.content) {
+			const role = entry.message.role;
+			const content = Array.isArray(entry.message.content)
+				? entry.message.content
+						.filter(
+							(c): c is { type: "text"; text: string } => c.type === "text",
+						)
+						.map((c) => c.text)
+						.join("\n")
+				: entry.message.content;
+			if (content) {
+				conversationParts.push(`${role}: ${content}`);
+			}
+		}
+	}
 
-  // ─── memory_extract ─────────────────────────────────────────────────
-  pi.registerTool({
-    name: 'memory_extract',
-    label: 'Memory',
-    description:
-      'Extract memories from the current session conversation using AI. Analyzes the session so far and saves useful information worth remembering.',
-    parameters: Type.Object({
-      scope: Type.Optional(
-        Type.Union(
-          [Type.Literal('global'), Type.Literal('project')],
-          { description: 'global = all projects, project = this project only. Default: project' }
-        )
-      ),
-      category: Type.Optional(
-        Type.String({ description: 'Category heading for extracted memories. Default: General' })
-      ),
-    }),
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const scope = params.scope ?? 'project';
-      const category = params.category ?? 'General';
+	const conversationText = conversationParts.join("\n\n");
 
-      // Get session messages from the current session
-      const entries = ctx.sessionManager.getEntries();
-      const messageEntries = entries.filter((e) => e.type === 'message');
+	// Get existing memories for context
+	const existingMemories = await memoryManager.getMemoryContext(ctx.cwd);
 
-      if (messageEntries.length === 0) {
-        return { content: [{ type: 'text', text: 'No messages in session to extract memories from.' }], details: undefined };
-      }
-
-      // Build conversation text from session messages
-      const conversationParts: string[] = [];
-      for (const entry of messageEntries) {
-        if ('message' in entry && entry.message.role && entry.message.content) {
-          const role = entry.message.role;
-          const content = Array.isArray(entry.message.content)
-            ? entry.message.content
-                .filter((c): c is { type: 'text'; text: string } => c.type === 'text')
-                .map((c) => c.text)
-                .join('\n')
-            : entry.message.content;
-          if (content) {
-            conversationParts.push(`${role}: ${content}`);
-          }
-        }
-      }
-
-      const conversationText = conversationParts.join('\n\n');
-
-      // Get existing memories for context
-      const existingMemories = await memoryManager.getMemoryContext(ctx.cwd);
-
-      // Build extraction prompt
-      const extractionPrompt = `You are a memory extraction system. Your job is to identify information worth remembering from a conversation.
+	// Build extraction prompt
+	const extractionPrompt = `You are a memory extraction system. Your job is to identify information worth remembering from a conversation.
 
 <existing_memories>
-${existingMemories || 'No existing memories.'}
+${existingMemories || "No existing memories."}
 </existing_memories>
 
 <conversation>
@@ -219,43 +144,256 @@ Respond ONLY with valid JSON, no markdown fences:
 
 If nothing worth remembering, respond: {"memories": []}`;
 
-      try {
-        // Load config and call cheap model
-        const config = await loadConfig(ctx.cwd);
+	try {
+		// Load config and call cheap model
+		const config = await loadConfig(ctx.cwd);
 
-        if (!config.apiType || !config.modelId || !config.apiKey) {
-          return {
-            content: [{ type: 'text', text: 'No cheap model configured. Please set piMemory config in settings.json.' }],
-            details: undefined,
-          };
-        }
+		if (!config.apiType || !config.modelId || !config.apiKey) {
+			return "No cheap model configured. Please set piMemory config in settings.json.";
+		}
 
-        const extractionResult = await callCheapModel(config, extractionPrompt, _signal);
+		const extractionResult = await callCheapModel(
+			config,
+			extractionPrompt,
+			signal,
+		);
 
-        if (!extractionResult) {
-          return { content: [{ type: 'text', text: 'Failed to extract memories from the model.' }], details: undefined };
-        }
+		if (!extractionResult) {
+			return "Failed to extract memories from the model.";
+		}
 
-        // Process the result
-        const result = await memoryManager.processExtractionResult(extractionResult, ctx.cwd);
+		// Process the result
+		const result = await memoryManager.processExtractionResult(
+			extractionResult,
+			ctx.cwd,
+		);
 
-        if (result.memories.length === 0) {
-          return { content: [{ type: 'text', text: 'No new memories extracted from the session.' }], details: undefined };
-        }
+		if (result.memories.length === 0) {
+			return "No new memories extracted from the session.";
+		}
 
-        // Save each extracted memory with the specified scope and category
-        for (const mem of result.memories) {
-          await memoryManager.appendMemory(mem.text, scope, ctx.cwd, category);
-        }
+		// Save each extracted memory with the specified scope and category
+		for (const mem of result.memories) {
+			await memoryManager.appendMemory(mem.text, scope, ctx.cwd, category);
+		}
 
-        const memoriesList = result.memories.map((m) => `- ${m.text}`).join('\n');
-        const text = `Extracted ${result.memories.length} memory(s) from session:\n${memoriesList}`;
+		const memoriesList = result.memories.map((m) => `- ${m.text}`).join("\n");
+		return `Extracted ${result.memories.length} memory(s) from session:\n${memoriesList}`;
+	} catch (err) {
+		console.debug("[pi-memory] memory_extract failed:", err);
+		return `Error extracting memories: ${err instanceof Error ? err.message : "Unknown error"}`;
+	}
+}
 
-        return { content: [{ type: 'text', text }], details: undefined };
-      } catch (err) {
-        console.debug('[pi-memory] memory_extract failed:', err);
-        return { content: [{ type: 'text', text: `Error extracting memories: ${err instanceof Error ? err.message : 'Unknown error'}` }], details: undefined };
-      }
-    },
-  });
+export default function (pi: ExtensionAPI) {
+	// ─── System prompt injection ────────────────────────────────────────
+	pi.on(
+		"before_agent_start",
+		async (
+			event: BeforeAgentStartEvent,
+			ctx: ExtensionContext,
+		): Promise<BeforeAgentStartEventResult | undefined> => {
+			lastUserPrompt = event.prompt;
+
+			const memoryContext = await memoryManager.getMemoryContext(ctx.cwd);
+			if (!memoryContext) return;
+
+			return {
+				systemPrompt: `${event.systemPrompt}\n\n${memoryContext}`,
+			};
+		},
+	);
+
+	// ─── Auto-extraction after agent response ───────────────────────────
+	pi.on("agent_end", async (event: AgentEndEvent, ctx: ExtensionContext) => {
+		const messages = event.messages;
+		if (messages.length === 0) return;
+
+		const lastMessage = messages[messages.length - 1];
+		let agentResponseText = "";
+		if ("content" in lastMessage && Array.isArray(lastMessage.content)) {
+			for (const block of lastMessage.content) {
+				if (typeof block === "string") {
+					agentResponseText += block;
+				} else if (block && typeof block === "object" && "text" in block) {
+					agentResponseText += (block as { text: string }).text;
+				}
+			}
+		}
+
+		if (!agentResponseText || !lastUserPrompt) return;
+
+		extractMemoriesInBackground({
+			projectPath: ctx.cwd,
+			userMessage: lastUserPrompt,
+			agentResponseText,
+			memoryManager,
+			modelRegistry: ctx.modelRegistry,
+			cwd: ctx.cwd,
+		}).catch(() => {});
+	});
+
+	// ─── memory_read ────────────────────────────────────────────────────
+	pi.registerTool({
+		name: "memory_read",
+		label: "Memory",
+		description:
+			"Read stored memories. Returns global and project memory contents. Use to check what has already been remembered before adding new entries.",
+		parameters: Type.Object({
+			scope: Type.Optional(
+				Type.Union(
+					[
+						Type.Literal("all"),
+						Type.Literal("global"),
+						Type.Literal("project"),
+					],
+					{ description: "Which memories to read. Default: all" },
+				),
+			),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const scope = params.scope ?? "all";
+			const files = await memoryManager.getMemoryFiles(ctx.cwd);
+			const sections: string[] = [];
+
+			if ((scope === "all" || scope === "global") && files.global) {
+				sections.push(`## Global Memory\n${files.global}`);
+			}
+			if ((scope === "all" || scope === "project") && files.projectShared) {
+				sections.push(`## Project Memory\n${files.projectShared}`);
+			}
+
+			const text =
+				sections.length > 0 ? sections.join("\n\n") : "No memories stored.";
+			return { content: [{ type: "text", text }], details: undefined };
+		},
+	});
+
+	// ─── memory_add ─────────────────────────────────────────────────────
+	pi.registerTool({
+		name: "memory_add",
+		label: "Memory",
+		description:
+			"Save a memory entry. Use for user preferences, project decisions, conventions, and facts worth remembering across sessions. Avoid one-time task details.",
+		parameters: Type.Object({
+			text: Type.String({
+				description: "The memory to save — one concise line",
+			}),
+			scope: Type.Optional(
+				Type.Union([Type.Literal("global"), Type.Literal("project")], {
+					description:
+						"global = all projects, project = this project only. Default: project",
+				}),
+			),
+			category: Type.Optional(
+				Type.String({
+					description:
+						'Category heading, e.g. "User Preferences", "Technical Context", "Decisions". Default: General',
+				}),
+			),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const scope = params.scope ?? "project";
+			const category = params.category ?? "General";
+			await memoryManager.appendMemory(params.text, scope, ctx.cwd, category);
+			const text = `Saved to ${scope} memory under "${category}": ${params.text}`;
+			return { content: [{ type: "text", text }], details: undefined };
+		},
+	});
+
+	// ─── memory_remove ──────────────────────────────────────────────────
+	pi.registerTool({
+		name: "memory_remove",
+		label: "Memory",
+		description:
+			"Remove a memory entry by matching its text. Use when a memory is outdated, wrong, or the user asks to forget something.",
+		parameters: Type.Object({
+			text: Type.String({
+				description:
+					"Text to match against existing memories (case-insensitive partial match)",
+			}),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const removed = await memoryManager.removeMemory(params.text, ctx.cwd);
+			const text = removed
+				? `Removed memory matching: ${params.text}`
+				: `No memory found matching: ${params.text}`;
+			return { content: [{ type: "text", text }], details: undefined };
+		},
+	});
+
+	// ─── memory_extract ─────────────────────────────────────────────────
+	pi.registerTool({
+		name: "memory_extract",
+		label: "Memory",
+		description:
+			"Extract memories from the current session conversation using AI. Analyzes the session so far and saves useful information worth remembering.",
+		parameters: Type.Object({
+			scope: Type.Optional(
+				Type.Union([Type.Literal("global"), Type.Literal("project")], {
+					description:
+						"global = all projects, project = this project only. Default: project",
+				}),
+			),
+			category: Type.Optional(
+				Type.String({
+					description:
+						"Category heading for extracted memories. Default: General",
+				}),
+			),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const text = await runMemoryExtract(params, ctx, _signal);
+			return { content: [{ type: "text", text }], details: undefined };
+		},
+	});
+
+	// Register slash command so /memory_extract appears in autocomplete
+	pi.registerCommand("memory_extract", {
+		description: "Extract and save reusable memories from the current session",
+		getArgumentCompletions: (prefix: string): AutocompleteItem[] | null => {
+			const trimmed = prefix.trim();
+
+			// If user typed --category, return null for free text input
+			if (trimmed.startsWith("--category")) {
+				return null;
+			}
+
+			// If prefix is empty or starts with something that could be a scope value
+			const scopeOptions: AutocompleteItem[] = [
+				{ value: "global", label: "global (all projects)" },
+				{ value: "project", label: "project (this project only)" },
+			];
+
+			// If prefix contains --category with a value, still offer --category option
+			if (trimmed.includes("--category ")) {
+				return null; // User is typing the category value, no completion needed
+			}
+
+			// Show scope options if prefix is empty or matches one of them
+			if (!trimmed || trimmed.startsWith("g") || trimmed.startsWith("p")) {
+				const filtered = scopeOptions.filter((item) =>
+					item.value.startsWith(trimmed),
+				);
+				if (filtered.length > 0) {
+					return [
+						...filtered,
+						{ value: "--category", label: "--category <text>" },
+					];
+				}
+			}
+
+			// Show --category option if prefix starts with -
+			if (trimmed.startsWith("-")) {
+				return [{ value: "--category", label: "--category <text>" }];
+			}
+
+			return null;
+		},
+		handler: async (args, ctx) => {
+			const parsedArgs = parseMemoryExtractArgs(args);
+			const text = await runMemoryExtract(parsedArgs, ctx);
+			ctx.ui.notify(text, text.startsWith("Error") ? "error" : "info");
+		},
+	});
 }

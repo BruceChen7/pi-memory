@@ -2,12 +2,25 @@
   "name": "pi-memory",
   "version": "0.1.0",
   "description": "Persistent memory for Pi Agent — remembers user preferences, project decisions, and conventions across sessions",
-  "keywords": ["pi-package"],
+  "keywords": [
+    "pi-package"
+  ],
   "peerDependencies": {
     "@mariozechner/pi-coding-agent": "*",
     "@sinclair/typebox": "*"
   },
   "pi": {
-    "extensions": ["./extensions"]
+    "extensions": [
+      "./extensions"
+    ]
+  },
+  "scripts": {
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "format": "biome format --write ."
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.4",
+    "typescript": "^5.9.3"
   }
 }

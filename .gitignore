@@ -27,3 +27,6 @@ npm-debug.log*
 # Temporary files
 tmp/
 temp/
+
+# Pi memory runtime
+.pilot/
