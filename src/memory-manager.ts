@@ -63,7 +63,11 @@ export class MemoryManager {
 
     let content = sections.join('\n\n');
 
-    if (Buffer.byteLength(content, 'utf-8') > MAX_MEMORY_INJECT_SIZE) {
+    // Account for wrapper overhead (~140 bytes)
+    const WRAPPER_OVERHEAD = 200;
+    const effectiveLimit = MAX_MEMORY_INJECT_SIZE - WRAPPER_OVERHEAD;
+
+    if (Buffer.byteLength(content, 'utf-8') > effectiveLimit) {
       const lines = content.split('\n');
       const lineSizes = lines.map(l => Buffer.byteLength(l, 'utf-8'));
       let totalSize = lineSizes.reduce((a, b) => a + b, 0) + lines.length - 1;
@@ -75,9 +79,13 @@ export class MemoryManager {
 
       const toRemove = new Set<number>();
       for (const idx of bulletIndices) {
-        if (totalSize <= MAX_MEMORY_INJECT_SIZE || (lines.length - toRemove.size) <= 10) break;
+        // Stop if we've reached minimum or are under limit (after removing this item)
+        if ((lines.length - toRemove.size) <= 10) break;
+        
         totalSize -= lineSizes[idx] + 1;
         toRemove.add(idx);
+        
+        if (totalSize <= effectiveLimit) break;
       }
 
       content = lines.filter((_, i) => !toRemove.has(i)).join('\n');

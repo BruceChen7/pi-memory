@@ -49,9 +49,15 @@ export async function callCheapModel(
 }
 
 function resolveApiKey(apiKey: string): string {
+  // Handle $VAR or ${VAR} format
   const match = apiKey.match(/^\$\{?(\w+)\}?$/);
   if (match) {
     return process.env[match[1]] || '';
+  }
+  // Handle literal env var name (e.g., "FREE_DEEPSEEK_API_KEY")
+  // Check if it's a known env var and return its value
+  if (process.env[apiKey]) {
+    return process.env[apiKey];
   }
   return apiKey;
 }
@@ -161,10 +167,10 @@ async function callGoogle(
 function mergeSignals(signal1: AbortSignal, signal2: AbortSignal): AbortSignal {
   if (!signal1 || signal1.aborted) return signal2;
   if (!signal2 || signal2.aborted) return signal1;
-  
-  return new AbortSignal((resolve) => {
-    const abort = () => resolve();
-    signal1.addEventListener('abort', abort, { once: true });
-    signal2.addEventListener('abort', abort, { once: true });
-  });
+
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  signal1.addEventListener('abort', abort, { once: true });
+  signal2.addEventListener('abort', abort, { once: true });
+  return controller.signal;
 }
