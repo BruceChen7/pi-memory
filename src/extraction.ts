@@ -1,6 +1,7 @@
 import type { ModelRegistry } from "@mariozechner/pi-coding-agent";
 import { callCheapModel } from "./cheap-model";
 import { loadConfig } from "./config";
+import { error } from "./logger";
 import type { MemoryManager } from "./memory-manager";
 
 export interface MemoryExtractionContext {
@@ -99,7 +100,7 @@ export async function extractMemoriesInBackground(
 				}
 			}
 		} catch (err) {
-			console.debug("[pi-memory] Extraction API call failed:", err);
+			error("Extraction API call failed:", err);
 			return;
 		}
 
@@ -107,6 +108,6 @@ export async function extractMemoriesInBackground(
 
 		await memoryManager.processExtractionResult(extractionResult, projectPath);
 	} catch (err) {
-		console.debug("[pi-memory] Memory extraction failed:", err);
+		error("Memory extraction failed:", err);
 	}
 }

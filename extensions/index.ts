@@ -11,6 +11,7 @@ import { Type } from "@sinclair/typebox";
 import { callCheapModel } from "../src/cheap-model";
 import { loadConfig } from "../src/config";
 import { extractMemoriesInBackground } from "../src/extraction";
+import { error } from "../src/logger";
 import { MemoryManager } from "../src/memory-manager";
 
 const memoryManager = new MemoryManager();
@@ -180,7 +181,7 @@ If nothing worth remembering, respond: {"memories": []}`;
 		const memoriesList = result.memories.map((m) => `- ${m.text}`).join("\n");
 		return `Extracted ${result.memories.length} memory(s) from session:\n${memoriesList}`;
 	} catch (err) {
-		console.debug("[pi-memory] memory_extract failed:", err);
+		error("memory_extract failed:", err);
 		return `Error extracting memories: ${err instanceof Error ? err.message : "Unknown error"}`;
 	}
 }

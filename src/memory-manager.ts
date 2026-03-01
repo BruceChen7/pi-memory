@@ -2,6 +2,8 @@ import fs from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 
+import { error } from "./logger";
+
 function resolvePilotAppDir(): string {
 	switch (process.platform) {
 		case "win32":
@@ -206,7 +208,7 @@ If nothing worth remembering, respond: {"memories": []}`;
 
 			return { shouldSave: memories.length > 0, memories };
 		} catch (err) {
-			console.debug("[pi-memory] Extraction parse failed", err);
+			error("Extraction parse failed", err);
 			return { shouldSave: false, memories: [] };
 		}
 	}

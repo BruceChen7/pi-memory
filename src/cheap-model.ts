@@ -3,6 +3,7 @@
  * Supports custom base URL and various provider API formats.
  */
 import type { PiMemoryConfig } from "./config";
+import { debug, error } from "./logger";
 
 export async function callCheapModel(
 	config: PiMemoryConfig,
@@ -18,7 +19,7 @@ export async function callCheapModel(
 
 	const resolvedApiKey = resolveApiKey(apiKey);
 	if (!resolvedApiKey) {
-		console.debug("[pi-memory] No API key configured");
+		debug("No API key configured");
 		return null;
 	}
 
@@ -122,8 +123,8 @@ async function callOpenAICompatible(
 	});
 
 	if (!response.ok) {
-		console.debug(
-			"[pi-memory] OpenAI compatible API error:",
+		error(
+			"OpenAI compatible API error:",
 			response.status,
 			await response.text(),
 		);
@@ -161,11 +162,7 @@ async function callAnthropic(
 	});
 
 	if (!response.ok) {
-		console.debug(
-			"[pi-memory] Anthropic API error:",
-			response.status,
-			await response.text(),
-		);
+		error("Anthropic API error:", response.status, await response.text());
 		return null;
 	}
 
@@ -198,11 +195,7 @@ async function callGoogle(
 	});
 
 	if (!response.ok) {
-		console.debug(
-			"[pi-memory] Google API error:",
-			response.status,
-			await response.text(),
-		);
+		error("Google API error:", response.status, await response.text());
 		return null;
 	}
 
