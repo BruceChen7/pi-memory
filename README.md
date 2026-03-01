@@ -13,11 +13,17 @@ Persistent memory for Pi Agent — remembers user preferences, project decisions
 
 ## Installation
 
-```bash
-npm install
+Add to your `~/.pi/agent/settings.json`:
+
+```json
+{
+  "packages": [
+    "git:github.com/BruceChen7/pi-memory@main"
+  ]
+}
 ```
 
-This is a pi extension package. Install via pi's package manager.
+Then restart pi or run `/reload` to load the extension.
 
 ## Usage
 
