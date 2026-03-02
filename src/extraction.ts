@@ -48,7 +48,11 @@ export async function extractMemoriesInBackground(
     try {
       // Load config from settings
       const config = await loadConfig(cwd);
-      apiContext = { configApiType: config.apiType, configModelId: config.modelId, configTimeout: config.timeout };
+      apiContext = {
+        configApiType: config.apiType,
+        configModelId: config.modelId,
+        configTimeout: config.timeout,
+      };
 
       // If custom config is provided, use it
       if (config.apiType && config.modelId && config.apiKey) {
@@ -79,7 +83,10 @@ export async function extractMemoriesInBackground(
           ) || availableModels[0];
 
         if (!cheapModel) return;
-        apiContext.fallbackModel = { provider: cheapModel.provider, id: cheapModel.id };
+        apiContext.fallbackModel = {
+          provider: cheapModel.provider,
+          id: cheapModel.id,
+        };
 
         const apiKey = await modelRegistry.getApiKey(cheapModel);
         if (!apiKey) return;
@@ -103,7 +110,12 @@ export async function extractMemoriesInBackground(
         }
       }
     } catch (err) {
-      error("Extraction API call failed:", err, "\nAPI context:", JSON.stringify(apiContext, null, 2));
+      error(
+        "Extraction API call failed:",
+        err,
+        "\nAPI context:",
+        JSON.stringify(apiContext, null, 2),
+      );
       return;
     }
 
