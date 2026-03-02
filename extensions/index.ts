@@ -105,9 +105,11 @@ async function runMemoryExtract(
   const category = params.category ?? "General";
   const focus = params.focus;
 
-  // Set status bar indicator
   if (ctx.ui?.setStatus) {
-    ctx.ui.setStatus("memory-extract", "💾 Extracting memories...");
+    const theme = ctx.ui.theme;
+    const spinner = theme.fg("accent", "●");
+    const label = theme.fg("dim", " memory extracting…");
+    ctx.ui.setStatus("memory-extract", spinner + label);
   }
 
   // Get session messages from the current session
@@ -269,7 +271,6 @@ If nothing worth remembering, respond: {"memories": []}`;
     error("memory_extract failed:", err);
     return `Error extracting memories: ${err instanceof Error ? err.message : "Unknown error"}`;
   } finally {
-    // Clear status bar indicator
     if (ctx.ui?.setStatus) {
       ctx.ui.setStatus("memory-extract", undefined);
     }

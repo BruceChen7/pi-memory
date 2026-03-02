@@ -26,9 +26,11 @@ export async function extractMemoriesInBackground(
 ): Promise<void> {
   const { ui } = ctx;
 
-  // Set status bar indicator
   if (ui?.setStatus) {
-    ui.setStatus("memory-extract", "💾 Extracting memories...");
+    const theme = ui.theme;
+    const spinner = theme.fg("accent", "●");
+    const label = theme.fg("dim", " memory extracting…");
+    ui.setStatus("memory-extract", spinner + label);
   }
 
   try {
@@ -136,7 +138,6 @@ export async function extractMemoriesInBackground(
   } catch (err) {
     error("Memory extraction failed:", err);
   } finally {
-    // Clear status bar indicator
     if (ui?.setStatus) {
       ui.setStatus("memory-extract", undefined);
     }
