@@ -1,6 +1,11 @@
 # pi-memory
 
-Persistent memory for Pi Agent — remembers user preferences, project decisions, and conventions across sessions.
+Persistent memory for [Pi Agent](https://github.com/badlogic/pi-mono) — remembers user preferences, project decisions, and conventions across sessions.
+
+## Links
+
+- **Pi Website**: [https://pi.dev/](https://pi.dev/)
+- **Pi Agent**: [https://github.com/badlogic/pi-mono](https://github.com/badlogic/pi-mono)
 
 ## Features
 
@@ -23,11 +28,11 @@ Add to your `~/.pi/agent/settings.json`:
 }
 ```
 
-Then restart pi or run `/reload` to load the extension.
+Then restart Pi or run `/reload` to load the extension.
 
 ## Usage
 
-The extension is automatically loaded by pi. Memories are extracted and saved automatically during conversations.
+The extension is automatically loaded by Pi. Memories are extracted and saved automatically during conversations.
 
 ### Memory Scopes
 
