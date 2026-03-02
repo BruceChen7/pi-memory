@@ -72,7 +72,52 @@ await manager.removeMemory('some memory text', '/path/to/project');
 
 ## Configuration
 
-Default settings (can be customized in code):
+This plugin supports flexible configuration through `settings.json`. Add your configuration under the `piMemory` key.
+
+### Configuration Options
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `baseUrl` | string | Custom base URL for the LLM API (e.g., `"https://api.openai.com/v1"`) |
+| `apiType` | string | API type: `"openai-completions"`, `"openai-responses"`, `"anthropic-messages"`, or `"google-generativelanguage"` |
+| `modelId` | string | Model ID for memory extraction (e.g., `"gpt-4o-mini"`, `"claude-3-haiku-20240307"`) |
+| `apiKey` | string | API key - can be a literal key or environment variable name (e.g., `"$OPENAI_API_KEY"`) |
+| `timeout` | number | Timeout for extraction API calls in ms (default: `10000`) |
+| `provider` | string | Provider name from `models.json` (e.g., `"nahcrof"`, `"anyrouter"`) |
+
+### Method 1: Direct Configuration
+
+Configure directly in your `~/.pi/agent/settings.json` or project `.pi/settings.json`:
+
+```json
+{
+  "piMemory": {
+    "baseUrl": "https://api.openai.com/v1",
+    "apiType": "openai-responses",
+    "modelId": "gpt-4o-mini",
+    "apiKey": "$OPENAI_API_KEY",
+    "timeout": 15000
+  }
+}
+```
+
+### Method 2: Reference models.json
+
+If you have models configured in `~/.pi/agent/models.json`, you can reference a provider:
+
+```json
+{
+  "piMemory": {
+    "provider": "nahcrof",
+    "modelId": "gpt-4o-mini",
+    "timeout": 15000
+  }
+}
+```
+
+This will automatically load `baseUrl`, `api`, and `apiKey` from your `models.json` provider configuration.
+
+### Default Settings
 
 - **Extraction Debounce**: 30 seconds
 - **Max Memory Inject Size**: 50KB
