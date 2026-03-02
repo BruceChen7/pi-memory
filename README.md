@@ -4,8 +4,8 @@ Persistent memory for Pi Agent — remembers user preferences, project decisions
 
 ## Features
 
-- **Global Memory**: Shared across all projects, stored in `~/.config/.pilot/MEMORY.md`
-- **Project Memory**: Specific to each project, stored in `<project>/.pilot/MEMORY.md`
+- **Global Memory**: Shared across all projects, stored in `~/.config/.pi-memory/MEMORY.md`
+- **Project Memory**: Specific to each project, stored in `<project>/.pi-memory/MEMORY.md`
 - **Automatic Extraction**: Uses AI to identify valuable information worth remembering
 - **Smart Truncation**: Automatically trims memory when it exceeds token limits
 - **Debounced Extraction**: Prevents excessive memory operations (30s debounce)

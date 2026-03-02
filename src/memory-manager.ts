@@ -4,7 +4,27 @@ import path from "node:path";
 
 import { error } from "./logger";
 
-function resolvePilotAppDir(): string {
+function resolvePiMemoryAppDir(): string {
+  switch (process.platform) {
+    case "win32":
+      return path.join(
+        process.env.APPDATA || path.join(homedir(), "AppData", "Roaming"),
+        ".pi-memory",
+      );
+    case "linux":
+      return path.join(
+        process.env.XDG_CONFIG_HOME || path.join(homedir(), ".config"),
+        ".pi-memory",
+      );
+    default:
+      return path.join(homedir(), ".config", ".pi-memory");
+  }
+}
+
+const GLOBAL_MEMORY_PATH = path.join(resolvePiMemoryAppDir(), "MEMORY.md");
+
+// Legacy path constants for migration
+function resolveLegacyPilotAppDir(): string {
   switch (process.platform) {
     case "win32":
       return path.join(
@@ -21,7 +41,32 @@ function resolvePilotAppDir(): string {
   }
 }
 
-const GLOBAL_MEMORY_PATH = path.join(resolvePilotAppDir(), "MEMORY.md");
+const LEGACY_GLOBAL_MEMORY_PATH = path.join(
+  resolveLegacyPilotAppDir(),
+  "MEMORY.md",
+);
+
+// Migrate legacy .pilot/MEMORY.md to .pi-memory/MEMORY.md
+async function migrateMemoryFile(
+  legacyPath: string,
+  newPath: string,
+): Promise<void> {
+  try {
+    const legacyContent = await fs.readFile(legacyPath, "utf-8");
+    await fs.mkdir(path.dirname(newPath), { recursive: true });
+    await fs.writeFile(newPath, legacyContent, "utf-8");
+    await fs.unlink(legacyPath);
+  } catch (err: unknown) {
+    // Ignore errors - file may not exist or already migrated
+    if (
+      err instanceof Error &&
+      "code" in err &&
+      (err as NodeJS.ErrnoException).code !== "ENOENT"
+    ) {
+      error("Memory migration failed", err);
+    }
+  }
+}
 
 export const EXTRACTION_DEBOUNCE_MS = 30_000;
 export const MAX_MEMORY_INJECT_SIZE = 50 * 1024; // 50KB
@@ -53,9 +98,16 @@ export class MemoryManager {
   }
 
   async getMemoryContext(projectPath: string): Promise<string> {
+    // Migrate legacy memory files on first access
+    await migrateMemoryFile(LEGACY_GLOBAL_MEMORY_PATH, GLOBAL_MEMORY_PATH);
+    await migrateMemoryFile(
+      path.join(projectPath, ".pilot", "MEMORY.md"),
+      path.join(projectPath, ".pi-memory", "MEMORY.md"),
+    );
+
     const global = await this.loadFile(GLOBAL_MEMORY_PATH);
     const projectShared = await this.loadFile(
-      path.join(projectPath, ".pilot", "MEMORY.md"),
+      path.join(projectPath, ".pi-memory", "MEMORY.md"),
     );
 
     const sections: string[] = [];
@@ -110,10 +162,17 @@ export class MemoryManager {
   }
 
   async getMemoryFiles(projectPath: string): Promise<MemoryFiles> {
+    // Migrate legacy memory files on first access
+    await migrateMemoryFile(LEGACY_GLOBAL_MEMORY_PATH, GLOBAL_MEMORY_PATH);
+    await migrateMemoryFile(
+      path.join(projectPath, ".pilot", "MEMORY.md"),
+      path.join(projectPath, ".pi-memory", "MEMORY.md"),
+    );
+
     return {
       global: await this.loadFile(GLOBAL_MEMORY_PATH),
       projectShared: await this.loadFile(
-        path.join(projectPath, ".pilot", "MEMORY.md"),
+        path.join(projectPath, ".pi-memory", "MEMORY.md"),
       ),
     };
   }
@@ -219,6 +278,13 @@ If nothing worth remembering, respond: {"memories": []}`;
     projectPath: string,
     category: string = "General",
   ): Promise<void> {
+    // Migrate legacy memory files before writing
+    await migrateMemoryFile(LEGACY_GLOBAL_MEMORY_PATH, GLOBAL_MEMORY_PATH);
+    await migrateMemoryFile(
+      path.join(projectPath, ".pilot", "MEMORY.md"),
+      path.join(projectPath, ".pi-memory", "MEMORY.md"),
+    );
+
     const filePath = this.resolveFilePath(scope, projectPath);
 
     await fs.mkdir(path.dirname(filePath), { recursive: true });
@@ -254,7 +320,7 @@ If nothing worth remembering, respond: {"memories": []}`;
   async removeMemory(text: string, projectPath: string): Promise<boolean> {
     const files = [
       GLOBAL_MEMORY_PATH,
-      path.join(projectPath, ".pilot", "MEMORY.md"),
+      path.join(projectPath, ".pi-memory", "MEMORY.md"),
     ];
 
     for (const filePath of files) {
@@ -284,7 +350,7 @@ If nothing worth remembering, respond: {"memories": []}`;
       case "global":
         return GLOBAL_MEMORY_PATH;
       case "project":
-        return path.join(projectPath, ".pilot", "MEMORY.md");
+        return path.join(projectPath, ".pi-memory", "MEMORY.md");
     }
   }
 
