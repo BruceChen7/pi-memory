@@ -450,6 +450,56 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  // ─── memory_view command ─────────────────────────────────────────────
+  pi.registerCommand("memory_view", {
+    description: "View stored memories (default: project level)",
+    getArgumentCompletions: (): AutocompleteItem[] | null => {
+      return [
+        { value: "all", label: "all (show both global and project memories)" },
+        { value: "global", label: "global (global level memories only)" },
+        { value: "project", label: "project (project level memories only)" },
+        { value: "help", label: "help (show usage)" },
+      ];
+    },
+    handler: async (args, ctx) => {
+      const usage =
+        "Usage: /memory_view [all|global|project|help]\n" +
+        "Examples:\n" +
+        "  /memory_view\n" +
+        "  /memory_view project\n" +
+        "  /memory_view global\n" +
+        "  /memory_view all";
+      const rawArg = args.trim();
+
+      if (rawArg === "help") {
+        ctx.ui.notify(usage, "info");
+        return;
+      }
+
+      const scope = rawArg || "project";
+      if (scope !== "all" && scope !== "global" && scope !== "project") {
+        ctx.ui.notify(`Invalid argument: "${scope}".\n${usage}`, "error");
+        return;
+      }
+
+      const files = await memoryManager.getMemoryFiles(ctx.cwd);
+      const sections: string[] = [];
+
+      if ((scope === "all" || scope === "global") && files.global) {
+        sections.push(`## Global Memory\n${files.global}`);
+      }
+      if ((scope === "all" || scope === "project") && files.projectShared) {
+        sections.push(`## Project Memory\n${files.projectShared}`);
+      }
+
+      const text =
+        sections.length > 0 ? sections.join("\n\n") : "No memories stored.";
+
+      // Display using notify with info type
+      ctx.ui.notify(text, "info");
+    },
+  });
+
   // Register slash command so /memory_extract appears in autocomplete
   pi.registerCommand("memory_extract", {
     description: "Extract and save reusable memories from the current session",
