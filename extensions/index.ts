@@ -105,6 +105,11 @@ async function runMemoryExtract(
   const category = params.category ?? "General";
   const focus = params.focus;
 
+  // Set status bar indicator
+  if (ctx.ui?.setStatus) {
+    ctx.ui.setStatus("memory-extract", "💾 Extracting memories...");
+  }
+
   // Get session messages from the current session
   const entries = ctx.sessionManager.getEntries();
   const messageEntries = entries.filter((e) => e.type === "message");
@@ -263,6 +268,11 @@ If nothing worth remembering, respond: {"memories": []}`;
   } catch (err) {
     error("memory_extract failed:", err);
     return `Error extracting memories: ${err instanceof Error ? err.message : "Unknown error"}`;
+  } finally {
+    // Clear status bar indicator
+    if (ctx.ui?.setStatus) {
+      ctx.ui.setStatus("memory-extract", undefined);
+    }
   }
 }
 
@@ -311,6 +321,7 @@ export default function (pi: ExtensionAPI) {
       memoryManager,
       modelRegistry: ctx.modelRegistry,
       cwd: ctx.cwd,
+      ui: ctx.ui,
     }).catch(() => {});
   });
 

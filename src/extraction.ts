@@ -1,4 +1,7 @@
-import type { ModelRegistry } from "@mariozechner/pi-coding-agent";
+import type {
+  ExtensionUIContext,
+  ModelRegistry,
+} from "@mariozechner/pi-coding-agent";
 import { callCheapModel } from "./cheap-model";
 import { loadConfig } from "./config";
 import { error } from "./logger";
@@ -11,6 +14,7 @@ export interface MemoryExtractionContext {
   memoryManager: MemoryManager;
   modelRegistry: ModelRegistry;
   cwd: string;
+  ui?: ExtensionUIContext;
 }
 
 /**
@@ -20,6 +24,13 @@ export interface MemoryExtractionContext {
 export async function extractMemoriesInBackground(
   ctx: MemoryExtractionContext,
 ): Promise<void> {
+  const { ui } = ctx;
+
+  // Set status bar indicator
+  if (ui?.setStatus) {
+    ui.setStatus("memory-extract", "💾 Extracting memories...");
+  }
+
   try {
     const {
       projectPath,
@@ -124,5 +135,10 @@ export async function extractMemoriesInBackground(
     await memoryManager.processExtractionResult(extractionResult, projectPath);
   } catch (err) {
     error("Memory extraction failed:", err);
+  } finally {
+    // Clear status bar indicator
+    if (ui?.setStatus) {
+      ui.setStatus("memory-extract", undefined);
+    }
   }
 }
