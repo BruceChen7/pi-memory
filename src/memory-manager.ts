@@ -23,47 +23,61 @@ function resolvePiMemoryAppDir(): string {
 
 const GLOBAL_MEMORY_PATH = path.join(resolvePiMemoryAppDir(), "MEMORY.md");
 
-// Legacy path constants for migration
-function resolveLegacyPilotAppDir(): string {
-  switch (process.platform) {
-    case "win32":
-      return path.join(
-        process.env.APPDATA || path.join(homedir(), "AppData", "Roaming"),
-        ".pilot",
-      );
-    case "linux":
-      return path.join(
-        process.env.XDG_CONFIG_HOME || path.join(homedir(), ".config"),
-        ".pilot",
-      );
-    default:
-      return path.join(homedir(), ".config", ".pilot");
+function resolveProjectMemoryPath(projectPath: string): string {
+  return path.join(projectPath, ".pi", "pi-memory", "MEMORY.md");
+}
+
+function resolveLegacyProjectMemoryPaths(projectPath: string): string[] {
+  return [path.join(projectPath, ".pi-memory", "MEMORY.md")];
+}
+
+async function fileExists(filePath: string): Promise<boolean> {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
   }
 }
 
-const LEGACY_GLOBAL_MEMORY_PATH = path.join(
-  resolveLegacyPilotAppDir(),
-  "MEMORY.md",
-);
-
-// Migrate legacy .pilot/MEMORY.md to .pi-memory/MEMORY.md
 async function migrateMemoryFile(
   legacyPath: string,
   newPath: string,
 ): Promise<void> {
   try {
+    const legacyExists = await fileExists(legacyPath);
+    if (!legacyExists) return;
+
+    const newExists = await fileExists(newPath);
+    if (newExists) return;
+
     const legacyContent = await fs.readFile(legacyPath, "utf-8");
     await fs.mkdir(path.dirname(newPath), { recursive: true });
     await fs.writeFile(newPath, legacyContent, "utf-8");
     await fs.unlink(legacyPath);
   } catch (err: unknown) {
-    // Ignore errors - file may not exist or already migrated
     if (
       err instanceof Error &&
       "code" in err &&
       (err as NodeJS.ErrnoException).code !== "ENOENT"
     ) {
       error("Memory migration failed", err);
+    }
+  }
+}
+
+async function migrateProjectMemoryFile(projectPath: string): Promise<void> {
+  const projectMemoryPath = resolveProjectMemoryPath(projectPath);
+
+  if (await fileExists(projectMemoryPath)) {
+    return;
+  }
+
+  const legacyPaths = resolveLegacyProjectMemoryPaths(projectPath);
+  for (const legacyPath of legacyPaths) {
+    if (await fileExists(legacyPath)) {
+      await migrateMemoryFile(legacyPath, projectMemoryPath);
+      return;
     }
   }
 }
@@ -98,16 +112,11 @@ export class MemoryManager {
   }
 
   async getMemoryContext(projectPath: string): Promise<string> {
-    // Migrate legacy memory files on first access
-    await migrateMemoryFile(LEGACY_GLOBAL_MEMORY_PATH, GLOBAL_MEMORY_PATH);
-    await migrateMemoryFile(
-      path.join(projectPath, ".pilot", "MEMORY.md"),
-      path.join(projectPath, ".pi-memory", "MEMORY.md"),
-    );
+    await migrateProjectMemoryFile(projectPath);
 
     const global = await this.loadFile(GLOBAL_MEMORY_PATH);
     const projectShared = await this.loadFile(
-      path.join(projectPath, ".pi-memory", "MEMORY.md"),
+      resolveProjectMemoryPath(projectPath),
     );
 
     const sections: string[] = [];
@@ -123,23 +132,23 @@ export class MemoryManager {
 
     let content = sections.join("\n\n");
 
-    // Account for wrapper overhead (~140 bytes)
     const WRAPPER_OVERHEAD = 200;
     const effectiveLimit = MAX_MEMORY_INJECT_SIZE - WRAPPER_OVERHEAD;
 
     if (Buffer.byteLength(content, "utf-8") > effectiveLimit) {
       const lines = content.split("\n");
-      const lineSizes = lines.map((l) => Buffer.byteLength(l, "utf-8"));
+      const lineSizes = lines.map((line) => Buffer.byteLength(line, "utf-8"));
       let totalSize = lineSizes.reduce((a, b) => a + b, 0) + lines.length - 1;
 
       const bulletIndices: number[] = [];
       for (let i = 1; i < lines.length; i++) {
-        if (lines[i].startsWith("- ")) bulletIndices.push(i);
+        if (lines[i].startsWith("- ")) {
+          bulletIndices.push(i);
+        }
       }
 
       const toRemove = new Set<number>();
       for (const idx of bulletIndices) {
-        // Stop if we've reached minimum or are under limit (after removing this item)
         if (lines.length - toRemove.size <= 10) break;
 
         totalSize -= lineSizes[idx] + 1;
@@ -162,18 +171,11 @@ export class MemoryManager {
   }
 
   async getMemoryFiles(projectPath: string): Promise<MemoryFiles> {
-    // Migrate legacy memory files on first access
-    await migrateMemoryFile(LEGACY_GLOBAL_MEMORY_PATH, GLOBAL_MEMORY_PATH);
-    await migrateMemoryFile(
-      path.join(projectPath, ".pilot", "MEMORY.md"),
-      path.join(projectPath, ".pi-memory", "MEMORY.md"),
-    );
+    await migrateProjectMemoryFile(projectPath);
 
     return {
       global: await this.loadFile(GLOBAL_MEMORY_PATH),
-      projectShared: await this.loadFile(
-        path.join(projectPath, ".pi-memory", "MEMORY.md"),
-      ),
+      projectShared: await this.loadFile(resolveProjectMemoryPath(projectPath)),
     };
   }
 
@@ -278,12 +280,7 @@ If nothing worth remembering, respond: {"memories": []}`;
     projectPath: string,
     category: string = "General",
   ): Promise<void> {
-    // Migrate legacy memory files before writing
-    await migrateMemoryFile(LEGACY_GLOBAL_MEMORY_PATH, GLOBAL_MEMORY_PATH);
-    await migrateMemoryFile(
-      path.join(projectPath, ".pilot", "MEMORY.md"),
-      path.join(projectPath, ".pi-memory", "MEMORY.md"),
-    );
+    await migrateProjectMemoryFile(projectPath);
 
     const filePath = this.resolveFilePath(scope, projectPath);
 
@@ -318,10 +315,9 @@ If nothing worth remembering, respond: {"memories": []}`;
   }
 
   async removeMemory(text: string, projectPath: string): Promise<boolean> {
-    const files = [
-      GLOBAL_MEMORY_PATH,
-      path.join(projectPath, ".pi-memory", "MEMORY.md"),
-    ];
+    await migrateProjectMemoryFile(projectPath);
+
+    const files = [GLOBAL_MEMORY_PATH, resolveProjectMemoryPath(projectPath)];
 
     for (const filePath of files) {
       try {
@@ -337,7 +333,9 @@ If nothing worth remembering, respond: {"memories": []}`;
           await fs.writeFile(filePath, lines.join("\n"), "utf-8");
           return true;
         }
-      } catch {}
+      } catch {
+        // ignore and continue
+      }
     }
     return false;
   }
@@ -350,7 +348,7 @@ If nothing worth remembering, respond: {"memories": []}`;
       case "global":
         return GLOBAL_MEMORY_PATH;
       case "project":
-        return path.join(projectPath, ".pi-memory", "MEMORY.md");
+        return resolveProjectMemoryPath(projectPath);
     }
   }
 

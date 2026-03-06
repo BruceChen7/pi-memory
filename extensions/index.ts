@@ -289,12 +289,12 @@ export default function (pi: ExtensionAPI) {
 
       const memoryContext = await memoryManager.getMemoryContext(ctx.cwd);
       if (!memoryContext) {
-        debug("before_agent_start systemPrompt:\n" + event.systemPrompt);
+        debug(`before_agent_start systemPrompt:\n${event.systemPrompt}`);
         return;
       }
 
       const fullSystemPrompt = `${event.systemPrompt}\n\n${memoryContext}`;
-      debug("before_agent_start systemPrompt:\n" + fullSystemPrompt);
+      debug(`before_agent_start systemPrompt:\n${fullSystemPrompt}`);
       return {
         systemPrompt: fullSystemPrompt,
       };

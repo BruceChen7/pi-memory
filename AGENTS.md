@@ -82,8 +82,8 @@ interface MemoryConfig {
 ### Memory Storage
 
 - **Global Memory**: `~/.config/.pi-memory/MEMORY.md` (cross-project)
-- **Project Memory**: `<project>/.pi-memory/MEMORY.md` (project-specific)
-- **Legacy Migration**: Automatically migrates from `.pilot` to `.pi-memory`
+- **Project Memory**: `<project>/.pi/pi-memory/MEMORY.md` (project-specific)
+- **Legacy Migration**: Automatically migrates project memory from `.pi-memory` to `.pi/pi-memory`
 
 ### Key Classes
 
