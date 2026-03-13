@@ -243,7 +243,15 @@ If nothing worth remembering, respond: {"memories": []}`;
       const MAX_MEMORY_TEXT_LENGTH = 500;
       const MAX_CATEGORY_LENGTH = 50;
 
-      const parsed = JSON.parse(resultJson);
+      // Strip markdown code fences if present (LLM sometimes wraps JSON in ```json ... ```)
+      const cleanedJson = resultJson
+        .replace(/^```json\s*/i, "")
+        .replace(/\s*```$/i, "")
+        .replace(/^```\s*/i, "")
+        .replace(/\s*```$/i, "")
+        .trim();
+
+      const parsed = JSON.parse(cleanedJson);
       const rawMemories = Array.isArray(parsed.memories) ? parsed.memories : [];
       const memories = rawMemories.slice(0, MAX_MEMORIES_PER_EXTRACTION);
 
