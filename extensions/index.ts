@@ -8,7 +8,7 @@ import type {
 } from "@mariozechner/pi-coding-agent";
 import type { AutocompleteItem } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
-import { callCheapModel } from "../src/cheap-model";
+import { type CheapModelResult, callCheapModel } from "../src/cheap-model";
 import { loadConfig } from "../src/config";
 import { extractMemoriesInBackground } from "../src/extraction";
 import { debug, error } from "../src/logger";
@@ -240,33 +240,40 @@ If nothing worth remembering, respond: {"memories": []}`;
       return "No cheap model configured. Please set piMemory config in settings.json.";
     }
 
-    const extractionResult = await callCheapModel(
+    const extractionResult: CheapModelResult = await callCheapModel(
       config,
       extractionPrompt,
       signal ?? AbortSignal.timeout(config.timeout ?? 10_000),
     );
 
-    if (!extractionResult) {
-      return "Failed to extract memories from the model.";
+    if (!extractionResult.success) {
+      const errorDetail = extractionResult.error
+        ? `\n\nDetails: ${extractionResult.error}`
+        : "";
+      return `Failed to extract memories from the model.${errorDetail}`;
     }
+
+    const resultContent = extractionResult.content;
 
     // Process the result
-    const result = await memoryManager.processExtractionResult(
-      extractionResult,
-      ctx.cwd,
-    );
+    if (resultContent) {
+      const result = await memoryManager.processExtractionResult(
+        resultContent,
+        ctx.cwd,
+      );
 
-    if (result.memories.length === 0) {
-      return "No new memories extracted from the session.";
+      if (result.memories.length === 0) {
+        return "No new memories extracted from the session.";
+      }
+
+      // Save each extracted memory with the specified scope and category
+      for (const mem of result.memories) {
+        await memoryManager.appendMemory(mem.text, scope, ctx.cwd, category);
+      }
+
+      const memoriesList = result.memories.map((m) => `- ${m.text}`).join("\n");
+      return `Extracted ${result.memories.length} memory(s) from session:\n${memoriesList}`;
     }
-
-    // Save each extracted memory with the specified scope and category
-    for (const mem of result.memories) {
-      await memoryManager.appendMemory(mem.text, scope, ctx.cwd, category);
-    }
-
-    const memoriesList = result.memories.map((m) => `- ${m.text}`).join("\n");
-    return `Extracted ${result.memories.length} memory(s) from session:\n${memoriesList}`;
   } catch (err) {
     error("memory_extract failed:", err);
     return `Error extracting memories: ${err instanceof Error ? err.message : "Unknown error"}`;

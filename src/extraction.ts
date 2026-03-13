@@ -2,7 +2,7 @@ import type {
   ExtensionUIContext,
   ModelRegistry,
 } from "@mariozechner/pi-coding-agent";
-import { callCheapModel } from "./cheap-model";
+import { type CheapModelResult, callCheapModel } from "./cheap-model";
 import { loadConfig } from "./config";
 import { error } from "./logger";
 import type { MemoryManager } from "./memory-manager";
@@ -55,7 +55,7 @@ export async function extractMemoriesInBackground(
       existingMemories,
     );
 
-    let extractionResult: string | null = null;
+    let extractionResult: CheapModelResult | null = null;
     let apiContext: Record<string, unknown> = {};
 
     try {
@@ -132,9 +132,18 @@ export async function extractMemoriesInBackground(
       return;
     }
 
-    if (!extractionResult) return;
+    if (!extractionResult || !extractionResult.success) {
+      if (extractionResult?.error) {
+        error(`Memory extraction failed: ${extractionResult.error}`);
+      }
+      return;
+    }
 
-    await memoryManager.processExtractionResult(extractionResult, projectPath);
+    const resultContent = extractionResult.content;
+
+    if (resultContent) {
+      await memoryManager.processExtractionResult(resultContent, projectPath);
+    }
   } catch (err) {
     error("Memory extraction failed:", err);
   } finally {
