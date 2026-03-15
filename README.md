@@ -18,7 +18,7 @@ Persistent memory for [Pi Agent](https://github.com/badlogic/pi-mono) — rememb
 
 ## Installation
 
-Add to your `~/.pi/agent/settings.json`:
+Install via a git repository in your `~/.pi/agent/settings.json`:
 
 ```json
 {
@@ -27,6 +27,8 @@ Add to your `~/.pi/agent/settings.json`:
   ]
 }
 ```
+
+You can pin a tag or commit by replacing `@main` (for example, `@v0.1.0` or a commit SHA). HTTPS URLs are also supported, e.g. `https://github.com/BruceChen7/pi-memory@main`.
 
 Then restart Pi or run `/reload` to load the extension.
 
