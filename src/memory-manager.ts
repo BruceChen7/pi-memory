@@ -1,27 +1,59 @@
 import fs from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir as osHomedir } from "node:os";
 import path from "node:path";
 
 import { error } from "./logger";
 
-function resolvePiMemoryAppDir(): string {
-  switch (process.platform) {
-    case "win32":
-      return path.join(
-        process.env.APPDATA || path.join(homedir(), "AppData", "Roaming"),
-        ".pi-memory",
-      );
-    case "linux":
-      return path.join(
-        process.env.XDG_CONFIG_HOME || path.join(homedir(), ".config"),
-        ".pi-memory",
-      );
-    default:
-      return path.join(homedir(), ".config", ".pi-memory");
+// Test-only: allow overriding homedir for testing
+let _customHomedir: (() => string) | null = null;
+
+function homedir(): string {
+  if (_customHomedir) {
+    return _customHomedir();
   }
+  return osHomedir();
 }
 
-const GLOBAL_MEMORY_PATH = path.join(resolvePiMemoryAppDir(), "MEMORY.md");
+// Export test helper
+export function setTestHomedir(fn: (() => string) | null): void {
+  _customHomedir = fn;
+}
+
+// New global memory path (unified with project memory structure) - resolved lazily
+function resolveGlobalMemoryPath(): string {
+  return path.join(homedir(), ".pi", "pi-memory", "MEMORY.md");
+}
+
+// Legacy global memory paths for migration
+function resolveLegacyGlobalMemoryPaths(): string[] {
+  const legacyPaths: string[] = [];
+  switch (process.platform) {
+    case "win32":
+      legacyPaths.push(
+        path.join(
+          process.env.APPDATA || path.join(homedir(), "AppData", "Roaming"),
+          ".pi-memory",
+          "MEMORY.md",
+        ),
+      );
+      break;
+    case "linux":
+      legacyPaths.push(
+        path.join(
+          process.env.XDG_CONFIG_HOME || path.join(homedir(), ".config"),
+          ".pi-memory",
+          "MEMORY.md",
+        ),
+      );
+      break;
+    default:
+      legacyPaths.push(
+        path.join(homedir(), ".config", ".pi-memory", "MEMORY.md"),
+      );
+      break;
+  }
+  return legacyPaths;
+}
 
 function resolveProjectMemoryPath(projectPath: string): string {
   return path.join(projectPath, ".pi", "pi-memory", "MEMORY.md");
@@ -82,6 +114,51 @@ async function migrateProjectMemoryFile(projectPath: string): Promise<void> {
   }
 }
 
+async function migrateGlobalMemoryFile(): Promise<void> {
+  const legacyPaths = resolveLegacyGlobalMemoryPaths();
+
+  for (const legacyPath of legacyPaths) {
+    const legacyExists = await fileExists(legacyPath);
+    if (!legacyExists) continue;
+
+    const globalPath = resolveGlobalMemoryPath();
+    await fs.mkdir(path.dirname(globalPath), { recursive: true });
+
+    const legacyContent = await fs.readFile(legacyPath, "utf-8");
+    const newExists = await fileExists(globalPath);
+
+    if (newExists) {
+      // Merge legacy content into new file, avoiding duplicates
+      const newContent = await fs.readFile(globalPath, "utf-8");
+      const legacyLines = legacyContent.split("\n");
+      const newLines = newContent.split("\n");
+      const newSet = new Set(
+        newLines.filter((l) => l.startsWith("- ")).map((l) => l.slice(2)),
+      );
+
+      const mergedLines = [...newLines];
+      for (const line of legacyLines) {
+        if (line.startsWith("- ") && !newSet.has(line.slice(2))) {
+          mergedLines.push(line);
+        } else if (line.startsWith("## ")) {
+          // Append category if it doesn't exist in new file
+          const category = line;
+          if (!newContent.includes(category)) {
+            mergedLines.push("", category);
+          }
+        }
+      }
+
+      await fs.writeFile(globalPath, mergedLines.join("\n"), "utf-8");
+    } else {
+      await fs.writeFile(globalPath, legacyContent, "utf-8");
+    }
+
+    await fs.unlink(legacyPath);
+    return;
+  }
+}
+
 export const EXTRACTION_DEBOUNCE_MS = 30_000;
 export const MAX_MEMORY_INJECT_SIZE = 50 * 1024; // 50KB
 
@@ -112,9 +189,10 @@ export class MemoryManager {
   }
 
   async getMemoryContext(projectPath: string): Promise<string> {
+    await migrateGlobalMemoryFile();
     await migrateProjectMemoryFile(projectPath);
 
-    const global = await this.loadFile(GLOBAL_MEMORY_PATH);
+    const global = await this.loadFile(resolveGlobalMemoryPath());
     const projectShared = await this.loadFile(
       resolveProjectMemoryPath(projectPath),
     );
@@ -171,10 +249,11 @@ export class MemoryManager {
   }
 
   async getMemoryFiles(projectPath: string): Promise<MemoryFiles> {
+    await migrateGlobalMemoryFile();
     await migrateProjectMemoryFile(projectPath);
 
     return {
-      global: await this.loadFile(GLOBAL_MEMORY_PATH),
+      global: await this.loadFile(resolveGlobalMemoryPath()),
       projectShared: await this.loadFile(resolveProjectMemoryPath(projectPath)),
     };
   }
@@ -288,6 +367,7 @@ If nothing worth remembering, respond: {"memories": []}`;
     projectPath: string,
     category: string = "General",
   ): Promise<void> {
+    await migrateGlobalMemoryFile();
     await migrateProjectMemoryFile(projectPath);
 
     const filePath = this.resolveFilePath(scope, projectPath);
@@ -323,9 +403,13 @@ If nothing worth remembering, respond: {"memories": []}`;
   }
 
   async removeMemory(text: string, projectPath: string): Promise<boolean> {
+    await migrateGlobalMemoryFile();
     await migrateProjectMemoryFile(projectPath);
 
-    const files = [GLOBAL_MEMORY_PATH, resolveProjectMemoryPath(projectPath)];
+    const files = [
+      resolveGlobalMemoryPath(),
+      resolveProjectMemoryPath(projectPath),
+    ];
 
     for (const filePath of files) {
       try {
@@ -354,7 +438,7 @@ If nothing worth remembering, respond: {"memories": []}`;
   ): string {
     switch (scope) {
       case "global":
-        return GLOBAL_MEMORY_PATH;
+        return resolveGlobalMemoryPath();
       case "project":
         return resolveProjectMemoryPath(projectPath);
     }
