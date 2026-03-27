@@ -13,6 +13,11 @@ import { loadConfig } from "../src/config";
 import { extractMemoriesInBackground } from "../src/extraction";
 import { debug, error } from "../src/logger";
 import { MemoryManager } from "../src/memory-manager";
+import type {
+  MemoryAction,
+  MemoryEntry,
+  MemoryEntryInput,
+} from "../src/memory-types";
 
 const memoryManager = new MemoryManager();
 
@@ -96,13 +101,38 @@ function parseMemoryExtractArgs(args: string): {
   return { focus: focus ?? remainingTokens.join(" "), scope, category };
 }
 
+function formatAction(action: MemoryAction): string {
+  switch (action.action) {
+    case "create":
+      return `create ${action.entry.name} (${action.scope})`;
+    case "update":
+      return `update ${action.entry.name} (${action.id ?? action.name ?? "unknown"})`;
+    case "remove":
+      return `remove ${action.id ?? action.name ?? "unknown"}`;
+    default:
+      return "memory action";
+  }
+}
+
+function formatEntry(entry: MemoryEntry): string {
+  return [
+    `Name: ${entry.name}`,
+    `Description: ${entry.description}`,
+    `Type: ${entry.type}`,
+    `Scope: ${entry.scope}`,
+    "",
+    entry.content,
+  ]
+    .join("\n")
+    .trimEnd();
+}
+
 async function runMemoryExtract(
   params: { focus: string; scope?: "global" | "project"; category?: string },
   ctx: ExtensionContext | ExtensionCommandContext,
   signal?: AbortSignal,
 ): Promise<string> {
   const scope = params.scope ?? "project";
-  const category = params.category ?? "General";
   const focus = params.focus;
 
   if (ctx.ui?.setStatus) {
@@ -185,52 +215,14 @@ async function runMemoryExtract(
 
   const conversationText = conversationParts.join("\n\n");
 
-  // Get existing memories for context
-  const existingMemories = await memoryManager.getMemoryContext(ctx.cwd);
+  // Get existing memory index for context
+  const existingMemories = await memoryManager.getMemoryIndexSummary(ctx.cwd);
 
-  // Build extraction prompt
-  const extractionPrompt = `You are a memory extraction system. Your job is to identify information worth remembering from a conversation.
-
-<existing_memories>
-${existingMemories || "No existing memories."}
-</existing_memories>
-
-<conversation>
-${conversationText}
-</conversation>
-
-Analyze the conversation and determine if there is anything NEW worth remembering that is NOT already in existing memories.
-
-**User-specified focus: ${focus}**
-Extract memories primarily related to this focus area. If nothing matches the focus, return empty.
-
-General categories for reference:
-1. **User preferences** — coding style, tools, frameworks, communication preferences
-2. **Technical decisions** — architecture choices, library selections, patterns adopted
-3. **Project facts** — deployment targets, API conventions, team practices
-4. **Corrections** — if the user corrected the agent, remember the right way
-5. **Explicit requests** — "always do X", "never do Y", "I prefer Z"
-
-Rules:
-- Only extract genuinely useful, reusable information
-- Do NOT extract one-time task details ("fix the bug on line 42")
-- Do NOT extract things already in existing memories
-- Do NOT extract obvious things ("user is writing code")
-- Keep each memory to ONE concise line
-- If nothing is worth remembering, return empty
-
-Respond ONLY with valid JSON, no markdown fences:
-{
-  "memories": [
-    {
-      "text": "the memory text",
-      "scope": "global or project",
-      "category": "User Preferences or Technical Context or Decisions or Project Notes"
-    }
-  ]
-}
-
-If nothing worth remembering, respond: {"memories": []}`;
+  const extractionPrompt = memoryManager.buildExtractionPrompt({
+    conversationText,
+    existingMemories,
+    focus,
+  });
 
   try {
     // Load config and call cheap model
@@ -255,24 +247,39 @@ If nothing worth remembering, respond: {"memories": []}`;
 
     const resultContent = extractionResult.content;
 
-    // Process the result
     if (resultContent) {
-      const result = await memoryManager.processExtractionResult(
+      const report = await memoryManager.processExtractionResult(
         resultContent,
         ctx.cwd,
+        { defaultScope: scope },
       );
 
-      if (result.memories.length === 0) {
+      const applied = report.outcomes.filter(
+        (outcome) => outcome.status === "applied",
+      );
+      const skipped = report.outcomes.filter(
+        (outcome) => outcome.status === "skipped",
+      );
+
+      if (applied.length === 0) {
         return "No new memories extracted from the session.";
       }
 
-      // Save each extracted memory with the specified scope and category
-      for (const mem of result.memories) {
-        await memoryManager.appendMemory(mem.text, scope, ctx.cwd, category);
-      }
+      const appliedLines = applied
+        .map((outcome) => `- ${formatAction(outcome.action)}`)
+        .join("\n");
+      const skippedLines = skipped
+        .map(
+          (outcome) =>
+            `- ${formatAction(outcome.action)}${outcome.message ? ` (${outcome.message})` : ""}`,
+        )
+        .join("\n");
 
-      const memoriesList = result.memories.map((m) => `- ${m.text}`).join("\n");
-      return `Extracted ${result.memories.length} memory(s) from session:\n${memoriesList}`;
+      let message = `Applied ${applied.length} action(s):\n${appliedLines}`;
+      if (skippedLines) {
+        message += `\n\nSkipped ${skipped.length} action(s):\n${skippedLines}`;
+      }
+      return message;
     }
   } catch (err) {
     error("memory_extract failed:", err);
@@ -282,6 +289,8 @@ If nothing worth remembering, respond: {"memories": []}`;
       ctx.ui.setStatus("memory-extract", undefined);
     }
   }
+
+  return "No new memories extracted from the session.";
 }
 
 export default function (pi: ExtensionAPI) {
@@ -294,7 +303,10 @@ export default function (pi: ExtensionAPI) {
     ): Promise<BeforeAgentStartEventResult | undefined> => {
       lastUserPrompt = event.prompt;
 
-      const memoryContext = await memoryManager.getMemoryContext(ctx.cwd);
+      const memoryContext = await memoryManager.getMemoryContext(
+        ctx.cwd,
+        event.prompt,
+      );
       if (!memoryContext) {
         debug(`before_agent_start systemPrompt:\n${event.systemPrompt}`);
         return;
@@ -343,7 +355,7 @@ export default function (pi: ExtensionAPI) {
     name: "memory_read",
     label: "Memory",
     description:
-      "Read stored memories. Returns global and project memory contents. Use to check what has already been remembered before adding new entries.",
+      "Read stored memories. Returns memory index by default or a specific entry when requested.",
     parameters: Type.Object({
       scope: Type.Optional(
         Type.Union(
@@ -355,17 +367,88 @@ export default function (pi: ExtensionAPI) {
           { description: "Which memories to read. Default: all" },
         ),
       ),
+      mode: Type.Optional(
+        Type.Union([Type.Literal("index"), Type.Literal("entry")], {
+          description: "Read memory index or a specific entry. Default: index",
+        }),
+      ),
+      id: Type.Optional(
+        Type.String({ description: "Entry id (slug) to read" }),
+      ),
+      name: Type.Optional(Type.String({ description: "Entry name to read" })),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const scope = params.scope ?? "all";
-      const files = await memoryManager.getMemoryFiles(ctx.cwd);
+      const mode = params.mode ?? "index";
+
+      if (mode === "entry") {
+        const id = params.id;
+        const name = params.name;
+        if (!id && !name) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "Specify id or name when mode=entry.",
+              },
+            ],
+            details: undefined,
+          };
+        }
+
+        const scopes = scope === "all" ? ["project", "global"] : [scope];
+        const matches: MemoryEntry[] = [];
+
+        for (const targetScope of scopes) {
+          if (id) {
+            const entry = await memoryManager.getEntryById(
+              targetScope,
+              ctx.cwd,
+              id,
+            );
+            if (entry) matches.push(entry);
+          } else if (name) {
+            const entries = await memoryManager.findEntriesByName(
+              targetScope,
+              ctx.cwd,
+              name,
+            );
+            matches.push(...entries);
+          }
+        }
+
+        if (matches.length === 0) {
+          return {
+            content: [{ type: "text", text: "No memory entry found." }],
+            details: undefined,
+          };
+        }
+        if (matches.length > 1) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "Multiple matching entries found. Please specify scope or id.",
+              },
+            ],
+            details: undefined,
+          };
+        }
+
+        return {
+          content: [{ type: "text", text: formatEntry(matches[0]) }],
+          details: undefined,
+        };
+      }
+
+      const files = await memoryManager.getMemoryIndexFiles(ctx.cwd);
       const sections: string[] = [];
 
       if ((scope === "all" || scope === "global") && files.global) {
-        sections.push(`## Global Memory\n${files.global}`);
+        sections.push(`## Global Memory Index\n${files.global}`);
       }
       if ((scope === "all" || scope === "project") && files.projectShared) {
-        sections.push(`## Project Memory\n${files.projectShared}`);
+        sections.push(`## Project Memory Index\n${files.projectShared}`);
       }
 
       const text =
@@ -379,11 +462,29 @@ export default function (pi: ExtensionAPI) {
     name: "memory_add",
     label: "Memory",
     description:
-      "Save a memory entry. Use for user preferences, project decisions, conventions, and facts worth remembering across sessions. Avoid one-time task details.",
+      "Save a structured memory entry (name/description/type/content).",
     parameters: Type.Object({
-      text: Type.String({
-        description: "The memory to save — one concise line",
-      }),
+      text: Type.Optional(
+        Type.String({
+          description: "Legacy input: a one-line memory to save",
+        }),
+      ),
+      name: Type.Optional(Type.String({ description: "Entry name" })),
+      description: Type.Optional(
+        Type.String({ description: "One-line description" }),
+      ),
+      type: Type.Optional(
+        Type.Union(
+          [
+            Type.Literal("user"),
+            Type.Literal("feedback"),
+            Type.Literal("project"),
+            Type.Literal("reference"),
+          ],
+          { description: "Entry type" },
+        ),
+      ),
+      content: Type.Optional(Type.String({ description: "Entry content" })),
       scope: Type.Optional(
         Type.Union([Type.Literal("global"), Type.Literal("project")], {
           description:
@@ -393,15 +494,42 @@ export default function (pi: ExtensionAPI) {
       category: Type.Optional(
         Type.String({
           description:
-            'Category heading, e.g. "User Preferences", "Technical Context", "Decisions". Default: General',
+            'Legacy category mapping, e.g. "User Preferences", "Technical Context"',
         }),
       ),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const scope = params.scope ?? "project";
-      const category = params.category ?? "General";
-      await memoryManager.appendMemory(params.text, scope, ctx.cwd, category);
-      const text = `Saved to ${scope} memory under "${category}": ${params.text}`;
+      const type =
+        params.type ?? memoryManager.mapCategoryToType(params.category);
+
+      let entry: MemoryEntryInput | null = null;
+
+      if (params.text) {
+        entry = memoryManager.deriveEntryFromText(params.text, type);
+      } else if (params.name && params.description && params.content) {
+        entry = {
+          name: params.name,
+          description: params.description,
+          type,
+          content: params.content,
+        };
+      }
+
+      if (!entry) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "Provide either text or name/description/content.",
+            },
+          ],
+          details: undefined,
+        };
+      }
+
+      const created = await memoryManager.createEntry(scope, ctx.cwd, entry);
+      const text = `Saved ${created.name} (${created.id}) to ${scope} memory.`;
       return { content: [{ type: "text", text }], details: undefined };
     },
   });
@@ -411,18 +539,97 @@ export default function (pi: ExtensionAPI) {
     name: "memory_remove",
     label: "Memory",
     description:
-      "Remove a memory entry by matching its text. Use when a memory is outdated, wrong, or the user asks to forget something.",
+      "Remove a memory entry by id or name. Use when a memory is outdated, wrong, or the user asks to forget something.",
     parameters: Type.Object({
-      text: Type.String({
-        description:
-          "Text to match against existing memories (case-insensitive partial match)",
-      }),
+      id: Type.Optional(Type.String({ description: "Entry id (slug)" })),
+      name: Type.Optional(Type.String({ description: "Entry name" })),
+      scope: Type.Optional(
+        Type.Union([Type.Literal("global"), Type.Literal("project")], {
+          description: "Scope to remove from. Default: project",
+        }),
+      ),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const removed = await memoryManager.removeMemory(params.text, ctx.cwd);
+      const scope = params.scope;
+      const id = params.id;
+      const name = params.name;
+
+      if (!id && !name) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "Specify id or name to remove.",
+            },
+          ],
+          details: undefined,
+        };
+      }
+
+      const scopes = scope ? [scope] : ["project", "global"];
+      let target: MemoryEntry | null = null;
+
+      if (id) {
+        const matches: MemoryEntry[] = [];
+        for (const targetScope of scopes) {
+          const entry = await memoryManager.getEntryById(
+            targetScope,
+            ctx.cwd,
+            id,
+          );
+          if (entry) matches.push(entry);
+        }
+        if (matches.length > 1) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "Entry id exists in multiple scopes. Specify scope to remove.",
+              },
+            ],
+            details: undefined,
+          };
+        }
+        target = matches[0] ?? null;
+      } else if (name) {
+        const matches: MemoryEntry[] = [];
+        for (const targetScope of scopes) {
+          const entries = await memoryManager.findEntriesByName(
+            targetScope,
+            ctx.cwd,
+            name,
+          );
+          matches.push(...entries);
+        }
+        if (matches.length > 1) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "Multiple matching entries found. Specify scope or id.",
+              },
+            ],
+            details: undefined,
+          };
+        }
+        target = matches[0] ?? null;
+      }
+
+      if (!target) {
+        return {
+          content: [{ type: "text", text: "No memory entry found." }],
+          details: undefined,
+        };
+      }
+
+      const removed = await memoryManager.removeEntry(
+        target.scope,
+        ctx.cwd,
+        target.id,
+      );
       const text = removed
-        ? `Removed memory matching: ${params.text}`
-        : `No memory found matching: ${params.text}`;
+        ? `Removed memory entry: ${target.name}`
+        : "Failed to remove memory entry.";
       return { content: [{ type: "text", text }], details: undefined };
     },
   });
@@ -489,14 +696,14 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      const files = await memoryManager.getMemoryFiles(ctx.cwd);
+      const files = await memoryManager.getMemoryIndexFiles(ctx.cwd);
       const sections: string[] = [];
 
       if ((scope === "all" || scope === "global") && files.global) {
-        sections.push(`## Global Memory\n${files.global}`);
+        sections.push(`## Global Memory Index\n${files.global}`);
       }
       if ((scope === "all" || scope === "project") && files.projectShared) {
-        sections.push(`## Project Memory\n${files.projectShared}`);
+        sections.push(`## Project Memory Index\n${files.projectShared}`);
       }
 
       const text =

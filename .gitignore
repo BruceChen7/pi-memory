@@ -30,3 +30,6 @@ temp/
 
 # Pi memory runtime
 .pi-memory/
+
+# Pi agent runtime
+.pi/
