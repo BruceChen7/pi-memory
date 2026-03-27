@@ -47,13 +47,15 @@ export async function extractMemoriesInBackground(
     if (memoryManager.shouldSkipExtraction()) return;
     memoryManager.markExtractionRun();
 
-    const existingMemories = await memoryManager.getMemoryContext(projectPath);
+    const existingMemories =
+      await memoryManager.getMemoryIndexSummary(projectPath);
 
-    const extractionPrompt = memoryManager.buildExtractionPrompt(
-      userMessage,
-      agentResponseText,
+    const conversationText = `User: ${userMessage}\n\nAgent: ${agentResponseText}`;
+    const extractionPrompt = memoryManager.buildExtractionPrompt({
+      conversationText,
       existingMemories,
-    );
+      mode: "standard",
+    });
 
     let extractionResult: CheapModelResult | null = null;
     let apiContext: Record<string, unknown> = {};

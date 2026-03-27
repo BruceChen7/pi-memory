@@ -1,175 +1,61 @@
-import fs from "node:fs/promises";
-import { homedir as osHomedir } from "node:os";
-import path from "node:path";
-
+import { type CheapModelResult, callCheapModel } from "./cheap-model";
+import { type PiMemoryConfig, loadConfig } from "./config";
 import { error } from "./logger";
+import { MEMORY_POLICY_TEXT } from "./memory-policy";
+import { renderMemorySections } from "./memory-renderer";
+import { selectMemories } from "./memory-selector";
+import { MemoryStore } from "./memory-store";
+import type {
+  MemoryAction,
+  MemoryActionOutcome,
+  MemoryActionReport,
+  MemoryEntry,
+  MemoryEntryInput,
+  MemoryEntryType,
+  MemoryScope,
+} from "./memory-types";
 
-// Test-only: allow overriding homedir for testing
-let _customHomedir: (() => string) | null = null;
-
-function homedir(): string {
-  if (_customHomedir) {
-    return _customHomedir();
-  }
-  return osHomedir();
-}
-
-// Export test helper
-export function setTestHomedir(fn: (() => string) | null): void {
-  _customHomedir = fn;
-}
-
-// New global memory path (unified with project memory structure) - resolved lazily
-function resolveGlobalMemoryPath(): string {
-  return path.join(homedir(), ".pi", "pi-memory", "MEMORY.md");
-}
-
-// Legacy global memory paths for migration
-function resolveLegacyGlobalMemoryPaths(): string[] {
-  const legacyPaths: string[] = [];
-  switch (process.platform) {
-    case "win32":
-      legacyPaths.push(
-        path.join(
-          process.env.APPDATA || path.join(homedir(), "AppData", "Roaming"),
-          ".pi-memory",
-          "MEMORY.md",
-        ),
-      );
-      break;
-    case "linux":
-      legacyPaths.push(
-        path.join(
-          process.env.XDG_CONFIG_HOME || path.join(homedir(), ".config"),
-          ".pi-memory",
-          "MEMORY.md",
-        ),
-      );
-      break;
-    default:
-      legacyPaths.push(
-        path.join(homedir(), ".config", ".pi-memory", "MEMORY.md"),
-      );
-      break;
-  }
-  return legacyPaths;
-}
-
-function resolveProjectMemoryPath(projectPath: string): string {
-  return path.join(projectPath, ".pi", "pi-memory", "MEMORY.md");
-}
-
-function resolveLegacyProjectMemoryPaths(projectPath: string): string[] {
-  return [path.join(projectPath, ".pi-memory", "MEMORY.md")];
-}
-
-async function fileExists(filePath: string): Promise<boolean> {
-  try {
-    await fs.access(filePath);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function migrateMemoryFile(
-  legacyPath: string,
-  newPath: string,
-): Promise<void> {
-  try {
-    const legacyExists = await fileExists(legacyPath);
-    if (!legacyExists) return;
-
-    const newExists = await fileExists(newPath);
-    if (newExists) return;
-
-    const legacyContent = await fs.readFile(legacyPath, "utf-8");
-    await fs.mkdir(path.dirname(newPath), { recursive: true });
-    await fs.writeFile(newPath, legacyContent, "utf-8");
-    await fs.unlink(legacyPath);
-  } catch (err: unknown) {
-    if (
-      err instanceof Error &&
-      "code" in err &&
-      (err as NodeJS.ErrnoException).code !== "ENOENT"
-    ) {
-      error("Memory migration failed", err);
-    }
-  }
-}
-
-async function migrateProjectMemoryFile(projectPath: string): Promise<void> {
-  const projectMemoryPath = resolveProjectMemoryPath(projectPath);
-
-  if (await fileExists(projectMemoryPath)) {
-    return;
-  }
-
-  const legacyPaths = resolveLegacyProjectMemoryPaths(projectPath);
-  for (const legacyPath of legacyPaths) {
-    if (await fileExists(legacyPath)) {
-      await migrateMemoryFile(legacyPath, projectMemoryPath);
-      return;
-    }
-  }
-}
-
-async function migrateGlobalMemoryFile(): Promise<void> {
-  const legacyPaths = resolveLegacyGlobalMemoryPaths();
-
-  for (const legacyPath of legacyPaths) {
-    const legacyExists = await fileExists(legacyPath);
-    if (!legacyExists) continue;
-
-    const globalPath = resolveGlobalMemoryPath();
-    await fs.mkdir(path.dirname(globalPath), { recursive: true });
-
-    const legacyContent = await fs.readFile(legacyPath, "utf-8");
-    const newExists = await fileExists(globalPath);
-
-    if (newExists) {
-      // Merge legacy content into new file, avoiding duplicates
-      const newContent = await fs.readFile(globalPath, "utf-8");
-      const legacyLines = legacyContent.split("\n");
-      const newLines = newContent.split("\n");
-      const newSet = new Set(
-        newLines.filter((l) => l.startsWith("- ")).map((l) => l.slice(2)),
-      );
-
-      const mergedLines = [...newLines];
-      for (const line of legacyLines) {
-        if (line.startsWith("- ") && !newSet.has(line.slice(2))) {
-          mergedLines.push(line);
-        } else if (line.startsWith("## ")) {
-          // Append category if it doesn't exist in new file
-          const category = line;
-          if (!newContent.includes(category)) {
-            mergedLines.push("", category);
-          }
-        }
-      }
-
-      await fs.writeFile(globalPath, mergedLines.join("\n"), "utf-8");
-    } else {
-      await fs.writeFile(globalPath, legacyContent, "utf-8");
-    }
-
-    await fs.unlink(legacyPath);
-    return;
-  }
-}
+export { setTestHomedir } from "./memory-paths";
 
 export const EXTRACTION_DEBOUNCE_MS = 30_000;
 export const MAX_MEMORY_INJECT_SIZE = 50 * 1024; // 50KB
 
-export interface MemoryExtractionResult {
-  shouldSave: boolean;
-  memories: Array<{
-    text: string;
-    scope: "global" | "project";
-    category: string;
-  }>;
-}
+const MAX_ACTIONS_PER_EXTRACTION = 10;
+const MAX_FIELD_LENGTH = 500;
+const MAX_CONTENT_LENGTH = 2_000;
+const WRAPPER_OVERHEAD = 200;
+const ENGLISH_INDEX_PROMPT_TEMPLATE = [
+  "You are rewriting a memory entry for the memory index.",
+  "Summarize the entry into English only.",
+  "Return JSON only:",
+  '{"name":"<short English title>","description":"<English description, <=120 chars>"}',
+  "Rules:",
+  "- Use English only.",
+  "- Do not add new information.",
+  "- Keep it concise and factual.",
+].join("\n");
+
+const EXACT_EXTRACTION_RULES = [
+  "Exactness mode — be strict and conservative:",
+  "- Only store information explicitly stated in the conversation or explicit updates/corrections to existing memories.",
+  "- Do not infer or guess; ignore temporary tasks or ephemeral state.",
+  "- If unclear or not durable, output no actions.",
+  "- Write entry name and description in English for the index.",
+  "- Scope rules:",
+  "  - Use global only for cross-project personal preferences (e.g., general coding style).",
+  "  - If tied to current project context (tools, architecture, decisions), use project.",
+  "  - If unsure, choose project.",
+].join("\n");
+
+const CATEGORY_TYPE_MAP: Record<string, MemoryEntryType> = {
+  "User Preferences": "user",
+  "Technical Context": "project",
+  Decisions: "project",
+  "Project Notes": "project",
+  Corrections: "feedback",
+  Feedback: "feedback",
+  General: "project",
+};
 
 export interface MemoryFiles {
   global: string | null;
@@ -179,6 +65,7 @@ export interface MemoryFiles {
 export class MemoryManager {
   private lastExtractionTime = 0;
   private _enabled = true;
+  private englishIndexChecked = new Set<string>();
 
   get enabled(): boolean {
     return this._enabled;
@@ -188,55 +75,24 @@ export class MemoryManager {
     this._enabled = enabled;
   }
 
-  async getMemoryContext(projectPath: string): Promise<string> {
-    await migrateGlobalMemoryFile();
-    await migrateProjectMemoryFile(projectPath);
+  async getMemoryContext(projectPath: string, query: string): Promise<string> {
+    const stores = await this.getStores(projectPath);
+    const globalEntries = await stores.global.listEntries();
+    const projectEntries = await stores.project.listEntries();
 
-    const global = await this.loadFile(resolveGlobalMemoryPath());
-    const projectShared = await this.loadFile(
-      resolveProjectMemoryPath(projectPath),
+    const selection = selectMemories(
+      [...globalEntries, ...projectEntries],
+      query,
     );
 
-    const sections: string[] = [];
-
-    if (global) {
-      sections.push(`## Global Memory\n${global}`);
-    }
-    if (projectShared) {
-      sections.push(`## Project Memory\n${projectShared}`);
-    }
-
+    const sections = buildSections(selection.entries);
     if (sections.length === 0) return "";
 
-    let content = sections.join("\n\n");
+    const content = renderMemorySections(sections, {
+      maxBytes: MAX_MEMORY_INJECT_SIZE - WRAPPER_OVERHEAD,
+    });
 
-    const WRAPPER_OVERHEAD = 200;
-    const effectiveLimit = MAX_MEMORY_INJECT_SIZE - WRAPPER_OVERHEAD;
-
-    if (Buffer.byteLength(content, "utf-8") > effectiveLimit) {
-      const lines = content.split("\n");
-      const lineSizes = lines.map((line) => Buffer.byteLength(line, "utf-8"));
-      let totalSize = lineSizes.reduce((a, b) => a + b, 0) + lines.length - 1;
-
-      const bulletIndices: number[] = [];
-      for (let i = 1; i < lines.length; i++) {
-        if (lines[i].startsWith("- ")) {
-          bulletIndices.push(i);
-        }
-      }
-
-      const toRemove = new Set<number>();
-      for (const idx of bulletIndices) {
-        if (lines.length - toRemove.size <= 10) break;
-
-        totalSize -= lineSizes[idx] + 1;
-        toRemove.add(idx);
-
-        if (totalSize <= effectiveLimit) break;
-      }
-
-      content = lines.filter((_, i) => !toRemove.has(i)).join("\n");
-    }
+    if (!content) return "";
 
     return [
       "<memory>",
@@ -248,61 +104,96 @@ export class MemoryManager {
     ].join("\n");
   }
 
-  async getMemoryFiles(projectPath: string): Promise<MemoryFiles> {
-    await migrateGlobalMemoryFile();
-    await migrateProjectMemoryFile(projectPath);
-
+  async getMemoryIndexFiles(projectPath: string): Promise<MemoryFiles> {
+    const stores = await this.getStores(projectPath);
     return {
-      global: await this.loadFile(resolveGlobalMemoryPath()),
-      projectShared: await this.loadFile(resolveProjectMemoryPath(projectPath)),
+      global: await stores.global.getIndexContent(),
+      projectShared: await stores.project.getIndexContent(),
     };
   }
 
-  buildExtractionPrompt(
-    userMessage: string,
-    agentResponse: string,
-    existingMemories: string,
-  ): string {
-    return `You are a memory extraction system. Your job is to identify information worth remembering from a conversation between a user and a coding agent.
+  async getMemoryIndexSummary(projectPath: string): Promise<string> {
+    const files = await this.getMemoryIndexFiles(projectPath);
+    const sections: string[] = [];
+
+    if (files.global) {
+      sections.push(`## Global Memory Index\n${files.global}`);
+    }
+    if (files.projectShared) {
+      sections.push(`## Project Memory Index\n${files.projectShared}`);
+    }
+
+    if (sections.length === 0) return "No existing memories.";
+    return sections.join("\n\n");
+  }
+
+  buildExtractionPrompt(params: {
+    conversationText: string;
+    existingMemories: string;
+    focus?: string;
+    mode?: "standard" | "exact";
+  }): string {
+    const focusText = params.focus?.trim();
+    const focusBlock = focusText ? `\n\n<focus>\n${focusText}\n</focus>` : "";
+    const focusInstruction = focusText
+      ? `\n\nUser-specified focus: ${focusText}\nExtract memories primarily related to this focus. If nothing matches the focus, return empty.`
+      : "";
+    const exactnessBlock =
+      params.mode === "exact"
+        ? `\n\nExactness rules (MUST follow):\n${EXACT_EXTRACTION_RULES}`
+        : "";
+
+    return `You are a memory extraction system. Your task is to extract durable, reusable memories from a conversation between a user and a coding agent.
 
 <existing_memories>
-${existingMemories}
+${params.existingMemories}
 </existing_memories>
 
-<latest_exchange>
-User: ${userMessage}
+<conversation>
+${params.conversationText}
+</conversation>${focusBlock}${focusInstruction}
 
-Agent: ${agentResponse}
-</latest_exchange>
+Policy (MUST follow):
+${MEMORY_POLICY_TEXT}${exactnessBlock}
 
-Analyze the latest exchange and determine if there is anything NEW worth remembering that is NOT already in existing memories. Focus on:
+Update rules:
+- If the user asks to forget something, emit a REMOVE action.
+- If a new memory updates an existing one, prefer UPDATE.
+- You may UPDATE by exact id (slug) or by matching the name (case-insensitive).
+- If name matches multiple entries, do NOT update; return no action or CREATE if truly new.
 
-1. **User preferences** — coding style, tools, frameworks, communication preferences
-2. **Technical decisions** — architecture choices, library selections, patterns adopted
-3. **Project facts** — deployment targets, API conventions, team practices
-4. **Corrections** — if the user corrected the agent, remember the right way
-5. **Explicit requests** — "always do X", "never do Y", "I prefer Z"
-
-Rules:
-- Only extract genuinely useful, reusable information
-- Do NOT extract one-time task details ("fix the bug on line 42")
-- Do NOT extract things already in existing memories
-- Do NOT extract obvious things ("user is writing code")
-- Keep each memory to ONE concise line
-- If nothing is worth remembering, return empty
-
-Respond ONLY with valid JSON, no markdown fences:
+Output format (JSON only, no markdown):
 {
-  "memories": [
+  "actions": [
     {
-      "text": "the memory text",
-      "scope": "global or project",
-      "category": "User Preferences or Technical Context or Decisions or Project Notes"
+      "action": "create",
+      "scope": "global|project",
+      "entry": {
+        "name": "...",
+        "description": "...",
+        "type": "user|feedback|project|reference",
+        "content": "..."
+      }
+    },
+    {
+      "action": "update",
+      "id": "slug",
+      "entry": {
+        "name": "...",
+        "description": "...",
+        "type": "user|feedback|project|reference",
+        "content": "..."
+      }
+    },
+    {
+      "action": "remove",
+      "id": "slug",
+      "reason": "user asked to forget"
     }
   ]
 }
 
-If nothing worth remembering, respond: {"memories": []}`;
+If no memory is worth saving, respond: {"actions": []}`;
   }
 
   shouldSkipExtraction(): boolean {
@@ -316,13 +207,11 @@ If nothing worth remembering, respond: {"memories": []}`;
   async processExtractionResult(
     resultJson: string,
     projectPath: string,
-  ): Promise<MemoryExtractionResult> {
-    try {
-      const MAX_MEMORIES_PER_EXTRACTION = 10;
-      const MAX_MEMORY_TEXT_LENGTH = 500;
-      const MAX_CATEGORY_LENGTH = 50;
+    options?: { defaultScope?: MemoryScope },
+  ): Promise<MemoryActionReport> {
+    const outcomes: MemoryActionOutcome[] = [];
 
-      // Strip markdown code fences if present (LLM sometimes wraps JSON in ```json ... ```)
+    try {
       const cleanedJson = resultJson
         .replace(/^```json\s*/i, "")
         .replace(/\s*```$/i, "")
@@ -331,124 +220,451 @@ If nothing worth remembering, respond: {"memories": []}`;
         .trim();
 
       const parsed = JSON.parse(cleanedJson);
-      const rawMemories = Array.isArray(parsed.memories) ? parsed.memories : [];
-      const memories = rawMemories.slice(0, MAX_MEMORIES_PER_EXTRACTION);
+      const rawActions = Array.isArray(parsed.actions) ? parsed.actions : [];
+      const actions = rawActions.slice(0, MAX_ACTIONS_PER_EXTRACTION);
 
-      if (memories.length > 0) {
-        for (const mem of memories) {
-          if (mem.text && typeof mem.text === "string") {
-            const text =
-              mem.text.length > MAX_MEMORY_TEXT_LENGTH
-                ? `${mem.text.slice(0, MAX_MEMORY_TEXT_LENGTH)}…`
-                : mem.text;
-            const category = (
-              typeof mem.category === "string" ? mem.category : "General"
-            ).slice(0, MAX_CATEGORY_LENGTH);
-            await this.appendMemory(
-              text,
-              mem.scope === "global" ? "global" : "project",
-              projectPath,
-              category,
-            );
+      for (const rawAction of actions) {
+        let action = normalizeAction(rawAction);
+        if (!action) continue;
+
+        if (options?.defaultScope) {
+          if (action.action === "create") {
+            action = { ...action, scope: options.defaultScope };
+          } else if (!action.scope) {
+            action = { ...action, scope: options.defaultScope };
           }
         }
-      }
 
-      return { shouldSave: memories.length > 0, memories };
+        const outcome = await this.applyAction(action, projectPath);
+        outcomes.push(outcome);
+      }
     } catch (err) {
       error("Extraction parse failed", err);
-      return { shouldSave: false, memories: [] };
     }
+
+    return { outcomes };
   }
 
-  async appendMemory(
-    text: string,
-    scope: "global" | "project",
+  async createEntry(
+    scope: MemoryScope,
     projectPath: string,
-    category: string = "General",
-  ): Promise<void> {
-    await migrateGlobalMemoryFile();
-    await migrateProjectMemoryFile(projectPath);
-
-    const filePath = this.resolveFilePath(scope, projectPath);
-
-    await fs.mkdir(path.dirname(filePath), { recursive: true });
-
-    let content = "";
-    try {
-      content = await fs.readFile(filePath, "utf-8");
-    } catch {
-      content = "# Memory\n";
-    }
-
-    if (content.includes(text)) return;
-
-    const categoryHeading = `## ${category}`;
-    if (content.includes(categoryHeading)) {
-      const idx = content.indexOf(categoryHeading);
-      const nextHeadingIdx = content.indexOf(
-        "\n## ",
-        idx + categoryHeading.length,
-      );
-      const insertIdx = nextHeadingIdx === -1 ? content.length : nextHeadingIdx;
-      content =
-        content.slice(0, insertIdx).trimEnd() +
-        `\n- ${text}\n` +
-        content.slice(insertIdx);
-    } else {
-      content = `${content.trimEnd()}\n\n${categoryHeading}\n- ${text}\n`;
-    }
-
-    await fs.writeFile(filePath, content, "utf-8");
+    entry: MemoryEntryInput,
+  ): Promise<MemoryEntry> {
+    const store = await this.getStore(scope, projectPath);
+    return store.createEntry(sanitizeEntryInput(entry));
   }
 
-  async removeMemory(text: string, projectPath: string): Promise<boolean> {
-    await migrateGlobalMemoryFile();
-    await migrateProjectMemoryFile(projectPath);
+  async updateEntry(
+    scope: MemoryScope,
+    projectPath: string,
+    id: string,
+    entry: MemoryEntryInput,
+  ): Promise<MemoryEntry | null> {
+    const store = await this.getStore(scope, projectPath);
+    return store.updateEntry(id, sanitizeEntryInput(entry));
+  }
 
-    const files = [
-      resolveGlobalMemoryPath(),
-      resolveProjectMemoryPath(projectPath),
-    ];
+  async removeEntry(
+    scope: MemoryScope,
+    projectPath: string,
+    id: string,
+  ): Promise<boolean> {
+    const store = await this.getStore(scope, projectPath);
+    return store.removeEntry(id);
+  }
 
-    for (const filePath of files) {
-      try {
-        const content = await fs.readFile(filePath, "utf-8");
-        const lines = content.split("\n");
-        const matchIdx = lines.findIndex(
-          (line) =>
-            line.toLowerCase().includes(text.toLowerCase()) &&
-            line.startsWith("- "),
-        );
-        if (matchIdx !== -1) {
-          lines.splice(matchIdx, 1);
-          await fs.writeFile(filePath, lines.join("\n"), "utf-8");
-          return true;
+  async findEntriesByName(
+    scope: MemoryScope,
+    projectPath: string,
+    name: string,
+  ): Promise<MemoryEntry[]> {
+    const store = await this.getStore(scope, projectPath);
+    return store.findEntriesByName(name);
+  }
+
+  async getEntryById(
+    scope: MemoryScope,
+    projectPath: string,
+    id: string,
+  ): Promise<MemoryEntry | null> {
+    const store = await this.getStore(scope, projectPath);
+    return store.getEntryById(id);
+  }
+
+  deriveEntryFromText(text: string, type?: MemoryEntryType): MemoryEntryInput {
+    const trimmed = text.trim();
+    const name = deriveName(trimmed);
+    const description = deriveDescription(trimmed);
+    return {
+      name,
+      description,
+      type: type ?? "project",
+      content: trimmed,
+    };
+  }
+
+  mapCategoryToType(category?: string): MemoryEntryType {
+    if (!category) return "project";
+    const normalized = category.trim().toLowerCase();
+    for (const [key, value] of Object.entries(CATEGORY_TYPE_MAP)) {
+      if (key.toLowerCase() === normalized) return value;
+    }
+    return "project";
+  }
+
+  private async applyAction(
+    action: MemoryAction,
+    projectPath: string,
+  ): Promise<MemoryActionOutcome> {
+    switch (action.action) {
+      case "create": {
+        const entry = sanitizeEntryInput(action.entry);
+        const scope = action.scope ?? "project";
+        await this.createEntry(scope, projectPath, entry);
+        return { action, status: "applied" };
+      }
+      case "update": {
+        const entry = sanitizeEntryInput(action.entry);
+        const target = await this.resolveActionTarget(action, projectPath);
+        if (target.status !== "found") {
+          return { action, status: "skipped", message: target.message };
         }
-      } catch {
-        // ignore and continue
+        await this.updateEntry(
+          target.scope,
+          projectPath,
+          target.entry.id,
+          entry,
+        );
+        return { action, status: "applied" };
+      }
+      case "remove": {
+        const target = await this.resolveActionTarget(action, projectPath);
+        if (target.status !== "found") {
+          return { action, status: "skipped", message: target.message };
+        }
+        await this.removeEntry(target.scope, projectPath, target.entry.id);
+        return { action, status: "applied" };
       }
     }
-    return false;
   }
 
-  private resolveFilePath(
-    scope: "global" | "project",
+  private async resolveActionTarget(
+    action: Extract<MemoryAction, { action: "update" | "remove" }>,
     projectPath: string,
-  ): string {
-    switch (scope) {
-      case "global":
-        return resolveGlobalMemoryPath();
-      case "project":
-        return resolveProjectMemoryPath(projectPath);
+  ): Promise<
+    | { status: "found"; scope: MemoryScope; entry: MemoryEntry }
+    | { status: "ambiguous"; message: string }
+    | { status: "not_found"; message: string }
+  > {
+    const lookupScopes: MemoryScope[] = action.scope
+      ? [action.scope]
+      : ["project", "global"];
+
+    const matches: Array<{ scope: MemoryScope; entry: MemoryEntry }> = [];
+    for (const scope of lookupScopes) {
+      if (action.id) {
+        const entry = await this.getEntryById(scope, projectPath, action.id);
+        if (entry) matches.push({ scope, entry });
+      } else if (action.name) {
+        const entries = await this.findEntriesByName(
+          scope,
+          projectPath,
+          action.name,
+        );
+        matches.push(...entries.map((entry) => ({ scope, entry })));
+      }
+    }
+
+    if (matches.length === 0) {
+      return { status: "not_found", message: "No matching memory entry." };
+    }
+
+    if (matches.length > 1) {
+      return { status: "ambiguous", message: "Multiple matching entries." };
+    }
+
+    return {
+      status: "found",
+      scope: matches[0].scope,
+      entry: matches[0].entry,
+    };
+  }
+
+  private async getStore(
+    scope: MemoryScope,
+    projectPath: string,
+  ): Promise<MemoryStore> {
+    const store = MemoryStore.forScope(scope, projectPath);
+    await store.ensureReady();
+    await this.ensureEnglishIndex(scope, projectPath, store);
+    return store;
+  }
+
+  private async getStores(projectPath: string): Promise<{
+    global: MemoryStore;
+    project: MemoryStore;
+  }> {
+    const globalStore = MemoryStore.forScope("global", projectPath);
+    const projectStore = MemoryStore.forScope("project", projectPath);
+    await Promise.all([globalStore.ensureReady(), projectStore.ensureReady()]);
+    await Promise.all([
+      this.ensureEnglishIndex("global", projectPath, globalStore),
+      this.ensureEnglishIndex("project", projectPath, projectStore),
+    ]);
+    return { global: globalStore, project: projectStore };
+  }
+
+  private async ensureEnglishIndex(
+    scope: MemoryScope,
+    projectPath: string,
+    store: MemoryStore,
+  ): Promise<void> {
+    const key = `${projectPath}:${scope}`;
+    if (this.englishIndexChecked.has(key)) return;
+
+    const indexContent = await store.getIndexContent();
+    if (!indexContent || !containsCjk(indexContent)) {
+      this.englishIndexChecked.add(key);
+      return;
+    }
+
+    const config = await loadConfig(projectPath);
+    if (!config.apiType || !config.modelId || !config.apiKey) {
+      error(
+        "English index translation skipped: config incomplete",
+        JSON.stringify(
+          {
+            apiType: config.apiType,
+            modelId: config.modelId,
+            apiKey: config.apiKey ? "set" : "missing",
+          },
+          null,
+          2,
+        ),
+      );
+      return;
+    }
+
+    const entries = await store.listEntries();
+    for (const entry of entries) {
+      if (!needsEnglishTranslation(entry)) continue;
+      const summary = await summarizeEntryToEnglish(entry, config);
+      if (!summary) continue;
+
+      const nextEntry: MemoryEntryInput = {
+        name: limitLength(summary.name.trim(), MAX_FIELD_LENGTH),
+        description: limitLength(summary.description.trim(), MAX_FIELD_LENGTH),
+        type: entry.type,
+        content: entry.content,
+      };
+
+      if (
+        nextEntry.name === entry.name &&
+        nextEntry.description === entry.description
+      ) {
+        continue;
+      }
+
+      await store.updateEntry(entry.id, nextEntry);
+    }
+
+    const refreshedIndex = await store.getIndexContent();
+    if (refreshedIndex && !containsCjk(refreshedIndex)) {
+      this.englishIndexChecked.add(key);
     }
   }
+}
 
-  private async loadFile(filePath: string): Promise<string | null> {
-    try {
-      return await fs.readFile(filePath, "utf-8");
-    } catch {
+function buildSections(entries: MemoryEntry[]): Array<{
+  title: string;
+  entries: MemoryEntry[];
+}> {
+  const globalEntries = entries.filter((entry) => entry.scope === "global");
+  const projectEntries = entries.filter((entry) => entry.scope === "project");
+  const sections: Array<{ title: string; entries: MemoryEntry[] }> = [];
+  if (globalEntries.length > 0) {
+    sections.push({ title: "Global Memory", entries: globalEntries });
+  }
+  if (projectEntries.length > 0) {
+    sections.push({ title: "Project Memory", entries: projectEntries });
+  }
+  return sections;
+}
+
+function sanitizeEntryInput(entry: MemoryEntryInput): MemoryEntryInput {
+  return {
+    name: limitLength(entry.name.trim(), MAX_FIELD_LENGTH),
+    description: limitLength(entry.description.trim(), MAX_FIELD_LENGTH),
+    type: normalizeType(entry.type),
+    content: limitLength(entry.content.trim(), MAX_CONTENT_LENGTH),
+  };
+}
+
+function normalizeType(type: string): MemoryEntryType {
+  switch (type) {
+    case "user":
+    case "feedback":
+    case "project":
+    case "reference":
+      return type;
+    case "preference":
+    case "preferences":
+      return "user";
+    default:
+      return "project";
+  }
+}
+
+function normalizeAction(action: unknown): MemoryAction | null {
+  if (!action || typeof action !== "object") return null;
+  const raw = action as Record<string, unknown>;
+  const kind = raw.action;
+  if (kind === "create") {
+    const entry = parseEntryInput(raw.entry);
+    if (!entry) return null;
+    return {
+      action: "create",
+      scope: raw.scope === "global" ? "global" : "project",
+      entry,
+    };
+  }
+  if (kind === "update") {
+    const entry = parseEntryInput(raw.entry);
+    if (!entry) return null;
+    return {
+      action: "update",
+      id: typeof raw.id === "string" ? raw.id : undefined,
+      name: typeof raw.name === "string" ? raw.name : undefined,
+      scope:
+        raw.scope === "global" || raw.scope === "project"
+          ? raw.scope
+          : undefined,
+      entry,
+    };
+  }
+  if (kind === "remove") {
+    return {
+      action: "remove",
+      id: typeof raw.id === "string" ? raw.id : undefined,
+      name: typeof raw.name === "string" ? raw.name : undefined,
+      scope:
+        raw.scope === "global" || raw.scope === "project"
+          ? raw.scope
+          : undefined,
+      reason: typeof raw.reason === "string" ? raw.reason : undefined,
+    };
+  }
+  return null;
+}
+
+function parseEntryInput(entry: unknown): MemoryEntryInput | null {
+  if (!entry || typeof entry !== "object") return null;
+  const raw = entry as Record<string, unknown>;
+  if (
+    typeof raw.name !== "string" ||
+    typeof raw.description !== "string" ||
+    typeof raw.type !== "string" ||
+    typeof raw.content !== "string"
+  ) {
+    return null;
+  }
+  return {
+    name: raw.name,
+    description: raw.description,
+    type: normalizeType(raw.type),
+    content: raw.content,
+  };
+}
+
+function limitLength(value: string, max: number): string {
+  if (value.length <= max) return value;
+  return `${value.slice(0, max)}…`;
+}
+
+function deriveName(text: string): string {
+  const words = text.split(/\s+/).filter(Boolean);
+  if (words.length === 0) return "Memory";
+  return words.slice(0, 8).join(" ");
+}
+
+function deriveDescription(text: string): string {
+  return text.length > 120 ? `${text.slice(0, 120)}…` : text;
+}
+
+function containsCjk(text: string): boolean {
+  return /[\u3400-\u9fff]/.test(text);
+}
+
+function needsEnglishTranslation(entry: MemoryEntry): boolean {
+  return containsCjk(entry.name) || containsCjk(entry.description);
+}
+
+function buildEnglishIndexPrompt(entry: MemoryEntry): string {
+  const trimmedContent = entry.content.trim();
+  const limitedContent =
+    trimmedContent.length > 1_500
+      ? `${trimmedContent.slice(0, 1_500)}…`
+      : trimmedContent;
+  return [
+    ENGLISH_INDEX_PROMPT_TEMPLATE,
+    "",
+    "<entry>",
+    limitedContent || "(empty)",
+    "</entry>",
+  ].join("\n");
+}
+
+function parseEnglishIndexResponse(
+  content: string,
+): { name: string; description: string } | null {
+  const cleaned = content
+    .replace(/^```json\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .replace(/^```\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+
+  try {
+    const parsed = JSON.parse(cleaned) as {
+      name?: unknown;
+      description?: unknown;
+    };
+    if (
+      typeof parsed.name !== "string" ||
+      typeof parsed.description !== "string"
+    ) {
       return null;
     }
+    return { name: parsed.name, description: parsed.description };
+  } catch {
+    return null;
   }
+}
+
+async function summarizeEntryToEnglish(
+  entry: MemoryEntry,
+  config: PiMemoryConfig,
+): Promise<{ name: string; description: string } | null> {
+  const prompt = buildEnglishIndexPrompt(entry);
+  let result: CheapModelResult;
+
+  try {
+    result = await callCheapModel(
+      config,
+      prompt,
+      AbortSignal.timeout(config.timeout ?? 10_000),
+    );
+  } catch (err) {
+    error("English index translation failed", err);
+    return null;
+  }
+
+  if (!result.success || !result.content) {
+    if (result.error) {
+      error("English index translation failed:", result.error);
+    }
+    return null;
+  }
+
+  return parseEnglishIndexResponse(result.content);
 }
