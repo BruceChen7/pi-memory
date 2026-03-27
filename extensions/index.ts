@@ -413,6 +413,7 @@ export default function (pi: ExtensionAPI) {
         Type.Union(
           [
             Type.Literal("user"),
+            Type.Literal("preference"),
             Type.Literal("feedback"),
             Type.Literal("project"),
             Type.Literal("reference"),

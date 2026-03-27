@@ -507,6 +507,9 @@ function normalizeType(type: string): MemoryEntryType {
     case "project":
     case "reference":
       return type;
+    case "preference":
+    case "preferences":
+      return "user";
     default:
       return "project";
   }
