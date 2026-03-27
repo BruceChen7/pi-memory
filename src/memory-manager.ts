@@ -263,8 +263,9 @@ export class MemoryManager {
     agentResponse: string,
     existingMemories: string,
   ): string {
-    return `You are a memory extraction system. Your job is to identify information worth remembering from a conversation between a user and a coding agent.
-
+    return `
+## Auto Memory
+You are a memory extraction system. Your job is to identify information worth remembering from a conversation between a user and a coding agent.
 <existing_memories>
 ${existingMemories}
 </existing_memories>
@@ -275,32 +276,60 @@ User: ${userMessage}
 Agent: ${agentResponse}
 </latest_exchange>
 
-Analyze the latest exchange and determine if there is anything NEW worth remembering that is NOT already in existing memories. Focus on:
+* If the user explicitly asks you to remember something, save it immediately as whichever type fits best.
+* If they ask you to forget something, find and remove the relevant entry.
 
-1. **User preferences** — coding style, tools, frameworks, communication preferences
-2. **Technical decisions** — architecture choices, library selections, patterns adopted
-3. **Project facts** — deployment targets, API conventions, team practices
-4. **Corrections** — if the user corrected the agent, remember the right way
-5. **Explicit requests** — "always do X", "never do Y", "I prefer Z"
 
-Rules:
-- Only extract genuinely useful, reusable information
-- Do NOT extract one-time task details ("fix the bug on line 42")
-- Do NOT extract things already in existing memories
-- Do NOT extract obvious things ("user is writing code")
-- Keep each memory to ONE concise line
-- If nothing is worth remembering, return empty
+### What Shoud you Rembered
 
-Respond ONLY with valid JSON, no markdown fences:
-{
-  "memories": [
-    {
-      "text": "the memory text",
-      "scope": "global or project",
-      "category": "User Preferences or Technical Context or Decisions or Project Notes"
-    }
-  ]
-}
+* You should build up this memory system over time so that future conversations can have a complete picture of who the user is,
+* how they'd like to collaborate with you, what behaviors to avoid or repeat, and the context behind the work the user gives you.
+
+### What NOT to save in memory
+
+- Code patterns, conventions, architecture, file paths, or project structure — these can be derived by reading the current project state.
+- Git history, recent changes, or who-changed-what — git log / git blame are authoritative.
+- Debugging solutions or fix recipes — the fix is in the code; the commit message has the context.
+- Anything already documented in CLAUDE.md files.
+- Ephemeral task details: in-progress work, temporary state, current conversation context.
+
+These exclusions apply even when the user explicitly asks you to save.
+If they ask you to save a PR list or activity summary, ask what was *surprising* or *non-obvious* about it — that is the part worth keeping.
+
+### How to save memories
+
+Saving a memory is a two-step process:
+
+#### Step 1
+
+write the memory to its own file (e.g., user_role.md, feedback_testing.md) using this frontmatter format:
+
+---
+name: {{memory name}}
+description: {{one-line description — used to decide relevance in future conversations, so be specific}}
+type: {{user, feedback, project, reference}}
+---
+
+{{memory content — for feedback/project types, structure as: rule/fact, then **Why:** and **How to apply:** lines}}
+
+#### Step 2
+* add a pointer to that file in MEMORY.md. MEMORY.md is an index, not a memory — each entry should be one line, under ~150 characters: - [Title](file.md) — one-line hook
+* It has no frontmatter. Never write memory content directly into "MEMORY.md".
+
+- MEMORY.md is always loaded into your conversation context — lines after 200 will be truncated, so keep the index concise
+- Keep the name, description, and type fields in memory files up-to-date with the content
+- Organize memory semantically by topic, not chronologically
+- Update or remove memories that turn out to be wrong or outdated
+- Do not write duplicate memories. First check if there is an existing memory you can update before writing a new one.
+
+
+### When to access memories
+- When memories seem relevant, or the user references prior-conversation work.
+- You MUST access memory when the user explicitly asks you to check, recall, or remember.
+- If the user says to *ignore* or *not use* memory: proceed as if MEMORY.md were empty. Do not apply remembered facts, cite, compare against, or mention memory content.
+- Memory records can become stale over time. Use memory as context for what was true at a given point in time.
+- Before answering the user or building assumptions based solely on information in memory records, verify that the memory is still correct and up-to-date by reading the current state of the files or resources.
+- If a recalled memory conflicts with current information, trust what you observe now — and update or remove the stale memory rather than acting on it.
 
 If nothing worth remembering, respond: {"memories": []}`;
   }
