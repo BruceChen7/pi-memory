@@ -13,6 +13,7 @@ Persistent memory for [Pi Agent](https://github.com/badlogic/pi-mono) — rememb
 - **Project Memory**: Entry files in `<project>/.pi/pi-memory/entries/` with an index in `<project>/.pi/pi-memory/MEMORY.md`
 - **Structured Entries**: Each memory is a standalone file with frontmatter metadata
 - **Automatic Extraction**: Uses AI to identify valuable information worth remembering
+- **English Index Normalization**: Memory index entries are summarized in English (including legacy migrations)
 - **Keyword-based Injection**: Matches memory entries to the current prompt with stopword filtering
 - **Debounced Extraction**: Prevents excessive memory operations (30s debounce)
 - **Memory Management**: Add, remove, and query memories programmatically
@@ -36,6 +37,10 @@ Then restart Pi or run `/reload` to load the extension.
 ## Usage
 
 The extension is automatically loaded by Pi. Memories are extracted and saved automatically during conversations.
+
+### Memory Commands
+
+- `/memory_extract`: Exact-mode extraction with strict rules (no arguments). Only explicit, durable memories are saved; project-context preferences stay in project scope.
 
 ### Memory Scopes
 

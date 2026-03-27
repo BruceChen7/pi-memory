@@ -1,3 +1,5 @@
+import { type CheapModelResult, callCheapModel } from "./cheap-model";
+import { type PiMemoryConfig, loadConfig } from "./config";
 import { error } from "./logger";
 import { MEMORY_POLICY_TEXT } from "./memory-policy";
 import { renderMemorySections } from "./memory-renderer";
@@ -22,6 +24,28 @@ const MAX_ACTIONS_PER_EXTRACTION = 10;
 const MAX_FIELD_LENGTH = 500;
 const MAX_CONTENT_LENGTH = 2_000;
 const WRAPPER_OVERHEAD = 200;
+const ENGLISH_INDEX_PROMPT_TEMPLATE = [
+  "You are rewriting a memory entry for the memory index.",
+  "Summarize the entry into English only.",
+  "Return JSON only:",
+  '{"name":"<short English title>","description":"<English description, <=120 chars>"}',
+  "Rules:",
+  "- Use English only.",
+  "- Do not add new information.",
+  "- Keep it concise and factual.",
+].join("\n");
+
+const EXACT_EXTRACTION_RULES = [
+  "Exactness mode — be strict and conservative:",
+  "- Only store information explicitly stated in the conversation or explicit updates/corrections to existing memories.",
+  "- Do not infer or guess; ignore temporary tasks or ephemeral state.",
+  "- If unclear or not durable, output no actions.",
+  "- Write entry name and description in English for the index.",
+  "- Scope rules:",
+  "  - Use global only for cross-project personal preferences (e.g., general coding style).",
+  "  - If tied to current project context (tools, architecture, decisions), use project.",
+  "  - If unsure, choose project.",
+].join("\n");
 
 const CATEGORY_TYPE_MAP: Record<string, MemoryEntryType> = {
   "User Preferences": "user",
@@ -41,6 +65,7 @@ export interface MemoryFiles {
 export class MemoryManager {
   private lastExtractionTime = 0;
   private _enabled = true;
+  private englishIndexChecked = new Set<string>();
 
   get enabled(): boolean {
     return this._enabled;
@@ -106,12 +131,17 @@ export class MemoryManager {
     conversationText: string;
     existingMemories: string;
     focus?: string;
+    mode?: "standard" | "exact";
   }): string {
     const focusText = params.focus?.trim();
     const focusBlock = focusText ? `\n\n<focus>\n${focusText}\n</focus>` : "";
     const focusInstruction = focusText
       ? `\n\nUser-specified focus: ${focusText}\nExtract memories primarily related to this focus. If nothing matches the focus, return empty.`
       : "";
+    const exactnessBlock =
+      params.mode === "exact"
+        ? `\n\nExactness rules (MUST follow):\n${EXACT_EXTRACTION_RULES}`
+        : "";
 
     return `You are a memory extraction system. Your task is to extract durable, reusable memories from a conversation between a user and a coding agent.
 
@@ -124,7 +154,7 @@ ${params.conversationText}
 </conversation>${focusBlock}${focusInstruction}
 
 Policy (MUST follow):
-${MEMORY_POLICY_TEXT}
+${MEMORY_POLICY_TEXT}${exactnessBlock}
 
 Update rules:
 - If the user asks to forget something, emit a REMOVE action.
@@ -366,6 +396,7 @@ If no memory is worth saving, respond: {"actions": []}`;
   ): Promise<MemoryStore> {
     const store = MemoryStore.forScope(scope, projectPath);
     await store.ensureReady();
+    await this.ensureEnglishIndex(scope, projectPath, store);
     return store;
   }
 
@@ -376,7 +407,71 @@ If no memory is worth saving, respond: {"actions": []}`;
     const globalStore = MemoryStore.forScope("global", projectPath);
     const projectStore = MemoryStore.forScope("project", projectPath);
     await Promise.all([globalStore.ensureReady(), projectStore.ensureReady()]);
+    await Promise.all([
+      this.ensureEnglishIndex("global", projectPath, globalStore),
+      this.ensureEnglishIndex("project", projectPath, projectStore),
+    ]);
     return { global: globalStore, project: projectStore };
+  }
+
+  private async ensureEnglishIndex(
+    scope: MemoryScope,
+    projectPath: string,
+    store: MemoryStore,
+  ): Promise<void> {
+    const key = `${projectPath}:${scope}`;
+    if (this.englishIndexChecked.has(key)) return;
+
+    const indexContent = await store.getIndexContent();
+    if (!indexContent || !containsCjk(indexContent)) {
+      this.englishIndexChecked.add(key);
+      return;
+    }
+
+    const config = await loadConfig(projectPath);
+    if (!config.apiType || !config.modelId || !config.apiKey) {
+      error(
+        "English index translation skipped: config incomplete",
+        JSON.stringify(
+          {
+            apiType: config.apiType,
+            modelId: config.modelId,
+            apiKey: config.apiKey ? "set" : "missing",
+          },
+          null,
+          2,
+        ),
+      );
+      return;
+    }
+
+    const entries = await store.listEntries();
+    for (const entry of entries) {
+      if (!needsEnglishTranslation(entry)) continue;
+      const summary = await summarizeEntryToEnglish(entry, config);
+      if (!summary) continue;
+
+      const nextEntry: MemoryEntryInput = {
+        name: limitLength(summary.name.trim(), MAX_FIELD_LENGTH),
+        description: limitLength(summary.description.trim(), MAX_FIELD_LENGTH),
+        type: entry.type,
+        content: entry.content,
+      };
+
+      if (
+        nextEntry.name === entry.name &&
+        nextEntry.description === entry.description
+      ) {
+        continue;
+      }
+
+      await store.updateEntry(entry.id, nextEntry);
+    }
+
+    const refreshedIndex = await store.getIndexContent();
+    if (refreshedIndex && !containsCjk(refreshedIndex)) {
+      this.englishIndexChecked.add(key);
+    }
   }
 }
 
@@ -491,4 +586,82 @@ function deriveName(text: string): string {
 
 function deriveDescription(text: string): string {
   return text.length > 120 ? `${text.slice(0, 120)}…` : text;
+}
+
+function containsCjk(text: string): boolean {
+  return /[\u3400-\u9fff]/.test(text);
+}
+
+function needsEnglishTranslation(entry: MemoryEntry): boolean {
+  return containsCjk(entry.name) || containsCjk(entry.description);
+}
+
+function buildEnglishIndexPrompt(entry: MemoryEntry): string {
+  const trimmedContent = entry.content.trim();
+  const limitedContent =
+    trimmedContent.length > 1_500
+      ? `${trimmedContent.slice(0, 1_500)}…`
+      : trimmedContent;
+  return [
+    ENGLISH_INDEX_PROMPT_TEMPLATE,
+    "",
+    "<entry>",
+    limitedContent || "(empty)",
+    "</entry>",
+  ].join("\n");
+}
+
+function parseEnglishIndexResponse(
+  content: string,
+): { name: string; description: string } | null {
+  const cleaned = content
+    .replace(/^```json\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .replace(/^```\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+
+  try {
+    const parsed = JSON.parse(cleaned) as {
+      name?: unknown;
+      description?: unknown;
+    };
+    if (
+      typeof parsed.name !== "string" ||
+      typeof parsed.description !== "string"
+    ) {
+      return null;
+    }
+    return { name: parsed.name, description: parsed.description };
+  } catch {
+    return null;
+  }
+}
+
+async function summarizeEntryToEnglish(
+  entry: MemoryEntry,
+  config: PiMemoryConfig,
+): Promise<{ name: string; description: string } | null> {
+  const prompt = buildEnglishIndexPrompt(entry);
+  let result: CheapModelResult;
+
+  try {
+    result = await callCheapModel(
+      config,
+      prompt,
+      AbortSignal.timeout(config.timeout ?? 10_000),
+    );
+  } catch (err) {
+    error("English index translation failed", err);
+    return null;
+  }
+
+  if (!result.success || !result.content) {
+    if (result.error) {
+      error("English index translation failed:", result.error);
+    }
+    return null;
+  }
+
+  return parseEnglishIndexResponse(result.content);
 }

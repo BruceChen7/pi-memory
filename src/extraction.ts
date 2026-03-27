@@ -54,6 +54,7 @@ export async function extractMemoriesInBackground(
     const extractionPrompt = memoryManager.buildExtractionPrompt({
       conversationText,
       existingMemories,
+      mode: "standard",
     });
 
     let extractionResult: CheapModelResult | null = null;

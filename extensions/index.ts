@@ -23,82 +23,88 @@ const memoryManager = new MemoryManager();
 
 let lastUserPrompt = "";
 
-function parseMemoryExtractArgs(args: string): {
-  focus: string;
-  scope?: "global" | "project";
-  category?: string;
-} {
-  const trimmed = args.trim();
-  if (!trimmed) return { focus: "" };
+type ContentBlock =
+  | { type: "text"; text: string }
+  | { type: "toolCall"; name: string; arguments: Record<string, unknown> };
 
-  const tokens = trimmed.split(/\s+/);
-  let scope: "global" | "project" | undefined;
-  let category: string | undefined;
-  let focus: string | undefined;
-  const remainingTokens: string[] = [];
+type SessionMessage = {
+  role: string;
+  content: ContentBlock[] | string;
+  isError?: boolean;
+  toolName?: string;
+  command?: string;
+  output?: string;
+  exitCode?: number;
+};
 
-  for (let i = 0; i < tokens.length; i++) {
-    const token = tokens[i];
+type SessionMessageEntry = {
+  type: "message";
+  message?: SessionMessage;
+};
 
-    if (token === "global" || token === "project") {
-      scope = token;
+function buildConversationText(messageEntries: SessionMessageEntry[]): string {
+  const conversationParts: string[] = [];
+
+  for (const entry of messageEntries) {
+    if (!entry.message) continue;
+    const msg = entry.message;
+    const role = msg.role;
+
+    if (role === "user") {
+      const content = Array.isArray(msg.content)
+        ? msg.content
+            .filter(
+              (c): c is { type: "text"; text: string } => c.type === "text",
+            )
+            .map((c) => c.text)
+            .join("\n")
+        : msg.content;
+      if (content) conversationParts.push(`user: ${content}`);
       continue;
     }
 
-    if (token === "--scope" && i + 1 < tokens.length) {
-      const value = tokens[++i];
-      if (value === "global" || value === "project") scope = value;
-      continue;
-    }
-
-    if (token.startsWith("scope=")) {
-      const value = token.slice("scope=".length);
-      if (value === "global" || value === "project") scope = value;
-      continue;
-    }
-
-    if (token === "--category" && i + 1 < tokens.length) {
-      category = tokens
-        .slice(i + 1)
-        .join(" ")
-        .trim();
-      break;
-    }
-
-    if (token.startsWith("category=")) {
-      category = token.slice("category=".length).trim();
-      continue;
-    }
-
-    if (token === "--focus" && i + 1 < tokens.length) {
-      // Collect all remaining tokens until the next flag
-      const focusParts: string[] = [];
-      for (let j = i + 1; j < tokens.length; j++) {
-        if (
-          tokens[j].startsWith("--") ||
-          tokens[j].startsWith("category=") ||
-          tokens[j].startsWith("scope=")
-        ) {
-          i = j - 1;
-          break;
+    if (role === "assistant") {
+      const parts: string[] = [];
+      if (Array.isArray(msg.content)) {
+        for (const c of msg.content) {
+          if (c.type === "text" && c.text) {
+            parts.push(c.text);
+          } else if (c.type === "toolCall") {
+            parts.push(
+              `[Tool call: ${c.name}(${JSON.stringify(c.arguments)})]`,
+            );
+          }
         }
-        focusParts.push(tokens[j]);
-        if (j === tokens.length - 1) i = j;
       }
-      focus = focusParts.join(" ").trim();
+      if (parts.length > 0)
+        conversationParts.push(`assistant: ${parts.join("\n")}`);
       continue;
     }
 
-    if (token.startsWith("focus=")) {
-      focus = token.slice("focus=".length).trim();
+    if (role === "toolResult") {
+      const content = Array.isArray(msg.content)
+        ? msg.content
+            .filter(
+              (c): c is { type: "text"; text: string } => c.type === "text",
+            )
+            .map((c) => c.text)
+            .join("\n")
+        : "";
+      if (content) {
+        const label = msg.isError ? "Tool error" : "Tool result";
+        conversationParts.push(`${label} (${msg.toolName}): ${content}`);
+      }
       continue;
     }
 
-    // Unrecognized tokens are treated as focus text
-    remainingTokens.push(token);
+    if (role === "bashExecution") {
+      conversationParts.push(
+        `bash: $ ${msg.command}\n${msg.output}${msg.exitCode ? ` (exit ${msg.exitCode})` : ""}`,
+      );
+    }
   }
 
-  return { focus: focus ?? remainingTokens.join(" "), scope, category };
+  return conversationParts.join("\n\n");
 }
 
 function formatAction(action: MemoryAction): string {
@@ -128,13 +134,9 @@ function formatEntry(entry: MemoryEntry): string {
 }
 
 async function runMemoryExtract(
-  params: { focus: string; scope?: "global" | "project"; category?: string },
   ctx: ExtensionContext | ExtensionCommandContext,
   signal?: AbortSignal,
 ): Promise<string> {
-  const scope = params.scope ?? "project";
-  const focus = params.focus;
-
   if (ctx.ui?.setStatus) {
     const theme = ctx.ui.theme;
     const spinner = theme.fg("accent", "●");
@@ -142,90 +144,25 @@ async function runMemoryExtract(
     ctx.ui.setStatus("memory-extract", spinner + label);
   }
 
-  // Get session messages from the current session
   const entries = ctx.sessionManager.getEntries();
-  const messageEntries = entries.filter((e) => e.type === "message");
+  const messageEntries = entries.filter(
+    (entry): entry is SessionMessageEntry => entry.type === "message",
+  );
 
   if (messageEntries.length === 0) {
     return "No messages in session to extract memories from.";
   }
 
-  // Build conversation text from session messages
-  type ContentBlock =
-    | { type: "text"; text: string }
-    | { type: "toolCall"; name: string; arguments: Record<string, unknown> };
-  const conversationParts: string[] = [];
-  for (const entry of messageEntries) {
-    if (!("message" in entry) || !entry.message) continue;
-    const msg = entry.message as {
-      role: string;
-      content: ContentBlock[] | string;
-      isError?: boolean;
-      toolName?: string;
-      command?: string;
-      output?: string;
-      exitCode?: number;
-    };
-    const role = msg.role;
-
-    if (role === "user") {
-      const content = Array.isArray(msg.content)
-        ? msg.content
-            .filter(
-              (c): c is { type: "text"; text: string } => c.type === "text",
-            )
-            .map((c) => c.text)
-            .join("\n")
-        : msg.content;
-      if (content) conversationParts.push(`user: ${content}`);
-    } else if (role === "assistant") {
-      const parts: string[] = [];
-      if (Array.isArray(msg.content)) {
-        for (const c of msg.content) {
-          if (c.type === "text" && c.text) {
-            parts.push(c.text);
-          } else if (c.type === "toolCall") {
-            parts.push(
-              `[Tool call: ${c.name}(${JSON.stringify(c.arguments)})]`,
-            );
-          }
-        }
-      }
-      if (parts.length > 0)
-        conversationParts.push(`assistant: ${parts.join("\n")}`);
-    } else if (role === "toolResult") {
-      const content = Array.isArray(msg.content)
-        ? msg.content
-            .filter(
-              (c): c is { type: "text"; text: string } => c.type === "text",
-            )
-            .map((c) => c.text)
-            .join("\n")
-        : "";
-      if (content) {
-        const label = msg.isError ? "Tool error" : "Tool result";
-        conversationParts.push(`${label} (${msg.toolName}): ${content}`);
-      }
-    } else if (role === "bashExecution") {
-      conversationParts.push(
-        `bash: $ ${msg.command}\n${msg.output}${msg.exitCode ? ` (exit ${msg.exitCode})` : ""}`,
-      );
-    }
-  }
-
-  const conversationText = conversationParts.join("\n\n");
-
-  // Get existing memory index for context
+  const conversationText = buildConversationText(messageEntries);
   const existingMemories = await memoryManager.getMemoryIndexSummary(ctx.cwd);
 
   const extractionPrompt = memoryManager.buildExtractionPrompt({
     conversationText,
     existingMemories,
-    focus,
+    mode: "exact",
   });
 
   try {
-    // Load config and call cheap model
     const config = await loadConfig(ctx.cwd);
 
     if (!config.apiType || !config.modelId || !config.apiKey) {
@@ -251,7 +188,6 @@ async function runMemoryExtract(
       const report = await memoryManager.processExtractionResult(
         resultContent,
         ctx.cwd,
-        { defaultScope: scope },
       );
 
       const applied = report.outcomes.filter(
@@ -634,32 +570,15 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  // ─── memory_extract ─────────────────────────────────────────────────
+  // ─── memory_extract ────────────────────────────────────────────────
   pi.registerTool({
     name: "memory_extract",
     label: "Memory",
     description:
-      "Extract memories from the current session conversation using AI. Analyzes the session so far and saves useful information worth remembering.",
-    parameters: Type.Object({
-      focus: Type.String({
-        description:
-          "What aspects of the conversation to extract memories from, e.g. 'user coding preferences', 'architecture decisions', 'debugging lessons learned'",
-      }),
-      scope: Type.Optional(
-        Type.Union([Type.Literal("global"), Type.Literal("project")], {
-          description:
-            "global = all projects, project = this project only. Default: project",
-        }),
-      ),
-      category: Type.Optional(
-        Type.String({
-          description:
-            "Category heading for extracted memories. Default: General",
-        }),
-      ),
-    }),
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const text = await runMemoryExtract(params, ctx, _signal);
+      "Extract memories with exact rules from the current session conversation using AI.",
+    parameters: Type.Object({}),
+    async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+      const text = await runMemoryExtract(ctx, _signal);
       return { content: [{ type: "text", text }], details: undefined };
     },
   });
@@ -716,56 +635,13 @@ export default function (pi: ExtensionAPI) {
 
   // Register slash command so /memory_extract appears in autocomplete
   pi.registerCommand("memory_extract", {
-    description: "Extract and save reusable memories from the current session",
-    getArgumentCompletions: (prefix: string): AutocompleteItem[] | null => {
-      const trimmed = prefix.trim();
-
-      // If user typed --category, return null for free text input
-      if (trimmed.startsWith("--category")) {
-        return null;
-      }
-
-      // If prefix is empty or starts with something that could be a scope value
-      const scopeOptions: AutocompleteItem[] = [
-        { value: "global", label: "global (all projects)" },
-        { value: "project", label: "project (this project only)" },
-      ];
-
-      // If prefix contains --category with a value, still offer --category option
-      if (trimmed.includes("--category ")) {
-        return null; // User is typing the category value, no completion needed
-      }
-
-      // Show scope options if prefix is empty or matches one of them
-      if (!trimmed || trimmed.startsWith("g") || trimmed.startsWith("p")) {
-        const filtered = scopeOptions.filter((item) =>
-          item.value.startsWith(trimmed),
-        );
-        if (filtered.length > 0) {
-          return [
-            ...filtered,
-            { value: "--category", label: "--category <text>" },
-          ];
-        }
-      }
-
-      // Show --category option if prefix starts with -
-      if (trimmed.startsWith("-")) {
-        return [{ value: "--category", label: "--category <text>" }];
-      }
-
-      return null;
-    },
+    description: "Extract memories with exact rules from the current session",
     handler: async (args, ctx) => {
-      const parsedArgs = parseMemoryExtractArgs(args);
-      if (!parsedArgs.focus) {
-        ctx.ui.notify(
-          "Usage: /memory_extract <focus> [--scope global|project] [--category <text>]\nExample: /memory_extract user coding preferences",
-          "error",
-        );
+      if (args.trim()) {
+        ctx.ui.notify("Usage: /memory_extract", "error");
         return;
       }
-      const text = await runMemoryExtract(parsedArgs, ctx);
+      const text = await runMemoryExtract(ctx);
       ctx.ui.notify(text, text.startsWith("Error") ? "error" : "info");
     },
   });
