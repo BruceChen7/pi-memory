@@ -145,6 +145,12 @@ export class MemoryStore {
   async createEntry(entry: MemoryEntryInput): Promise<MemoryEntry> {
     const normalizedEntry = normalizeEntryInput(entry);
     const existingEntries = await this.listEntries();
+    const normalizedContent = normalizeText(normalizedEntry.content);
+    const existingMatch = existingEntries.find(
+      (existing) => normalizeText(existing.content) === normalizedContent,
+    );
+    if (existingMatch) return existingMatch;
+
     const existingSlugs = new Set(existingEntries.map((e) => e.id));
     const slugBase = slugify(normalizedEntry.name);
     const slug = ensureUniqueSlug(slugBase, existingSlugs);
