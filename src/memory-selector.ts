@@ -4,11 +4,6 @@ export interface MemorySelection {
   entries: MemoryEntry[];
 }
 
-interface ScoredEntry {
-  entry: MemoryEntry;
-  score: number;
-}
-
 const TYPE_PRIORITY: Record<MemoryEntryType, number> = {
   user: 0,
   project: 1,

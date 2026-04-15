@@ -2,8 +2,9 @@ import type {
   ExtensionUIContext,
   ModelRegistry,
 } from "@mariozechner/pi-coding-agent";
-import { type CheapModelResult, callCheapModel } from "./cheap-model";
+import type { CheapModelResult } from "./cheap-model";
 import { loadConfig } from "./config";
+import { runExtractionPrompt } from "./extraction-runner";
 import { error } from "./logger";
 import type { MemoryManager } from "./memory-manager";
 
@@ -61,68 +62,31 @@ export async function extractMemoriesInBackground(
     let apiContext: Record<string, unknown> = {};
 
     try {
-      // Load config from settings
       const config = await loadConfig(cwd);
       apiContext = {
         configApiType: config.apiType,
         configModelId: config.modelId,
         configTimeout: config.timeout,
+        usingConfiguredModel: Boolean(
+          config.apiType && config.modelId && config.apiKey,
+        ),
       };
 
-      // If custom config is provided, use it
-      if (config.apiType && config.modelId && config.apiKey) {
-        const controller = new AbortController();
-        const timeout = setTimeout(
-          () => controller.abort(),
-          config.timeout || 10_000,
-        );
+      const controller = new AbortController();
+      const timeout = setTimeout(
+        () => controller.abort(),
+        config.timeout || 10_000,
+      );
 
-        try {
-          extractionResult = await callCheapModel(
-            config,
-            extractionPrompt,
-            controller.signal,
-          );
-        } finally {
-          clearTimeout(timeout);
-        }
-      } else {
-        // Fallback: use model registry's available models
-        const availableModels = modelRegistry.getAvailable();
-        const cheapModel =
-          availableModels.find(
-            (m) =>
-              m.id.includes("haiku") ||
-              m.id.includes("gpt-4o-mini") ||
-              m.id.includes("flash"),
-          ) || availableModels[0];
-
-        if (!cheapModel) return;
-        apiContext.fallbackModel = {
-          provider: cheapModel.provider,
-          id: cheapModel.id,
-        };
-
-        const apiKey = await modelRegistry.getApiKey(cheapModel);
-        if (!apiKey) return;
-
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 20_000);
-
-        try {
-          extractionResult = await callCheapModel(
-            {
-              apiType: cheapModel.provider,
-              modelId: cheapModel.id,
-              apiKey: apiKey,
-              timeout: 10_000,
-            },
-            extractionPrompt,
-            controller.signal,
-          );
-        } finally {
-          clearTimeout(timeout);
-        }
+      try {
+        extractionResult = await runExtractionPrompt({
+          config,
+          prompt: extractionPrompt,
+          signal: controller.signal,
+          modelRegistry,
+        });
+      } finally {
+        clearTimeout(timeout);
       }
     } catch (err) {
       error(

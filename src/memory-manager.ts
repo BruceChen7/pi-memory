@@ -1,5 +1,9 @@
-import { type CheapModelResult, callCheapModel } from "./cheap-model";
-import { type PiMemoryConfig, loadConfig } from "./config";
+import type { Api, Model } from "@mariozechner/pi-ai";
+import { loadConfig, type PiMemoryConfig } from "./config";
+import {
+  type ExtractionModelRegistry,
+  runExtractionPrompt,
+} from "./extraction-runner";
 import { error } from "./logger";
 import { MEMORY_POLICY_TEXT } from "./memory-policy";
 import { renderMemorySections } from "./memory-renderer";
@@ -62,10 +66,20 @@ export interface MemoryFiles {
   projectShared: string | null;
 }
 
+export interface MemoryManagerRuntimeModelContext {
+  modelRegistry?: ExtractionModelRegistry;
+  currentModel?: Model<Api>;
+}
+
 export class MemoryManager {
   private lastExtractionTime = 0;
   private _enabled = true;
   private englishIndexChecked = new Set<string>();
+  private runtimeModelContext: MemoryManagerRuntimeModelContext = {};
+
+  setRuntimeModelContext(context: MemoryManagerRuntimeModelContext): void {
+    this.runtimeModelContext = context;
+  }
 
   get enabled(): boolean {
     return this._enabled;
@@ -429,7 +443,11 @@ If no memory is worth saving, respond: {"actions": []}`;
     }
 
     const config = await loadConfig(projectPath);
-    if (!config.apiType || !config.modelId || !config.apiKey) {
+    const hasConfiguredModel = Boolean(
+      config.apiType && config.modelId && config.apiKey,
+    );
+
+    if (!hasConfiguredModel && !this.runtimeModelContext.modelRegistry) {
       error(
         "English index translation skipped: config incomplete",
         JSON.stringify(
@@ -437,6 +455,7 @@ If no memory is worth saving, respond: {"actions": []}`;
             apiType: config.apiType,
             modelId: config.modelId,
             apiKey: config.apiKey ? "set" : "missing",
+            hasRuntimeModelRegistry: false,
           },
           null,
           2,
@@ -448,7 +467,11 @@ If no memory is worth saving, respond: {"actions": []}`;
     const entries = await store.listEntries();
     for (const entry of entries) {
       if (!needsEnglishTranslation(entry)) continue;
-      const summary = await summarizeEntryToEnglish(entry, config);
+      const summary = await summarizeEntryToEnglish(entry, {
+        config,
+        modelRegistry: this.runtimeModelContext.modelRegistry,
+        currentModel: this.runtimeModelContext.currentModel,
+      });
       if (!summary) continue;
 
       const nextEntry: MemoryEntryInput = {
@@ -641,30 +664,45 @@ function parseEnglishIndexResponse(
   }
 }
 
+const emptyModelRegistry: ExtractionModelRegistry = {
+  getAvailable: () => [],
+  getApiKeyAndHeaders: async () => ({
+    ok: false,
+    error: "No model registry configured.",
+  }),
+};
+
+interface SummarizeEnglishOptions {
+  config: PiMemoryConfig;
+  modelRegistry?: ExtractionModelRegistry;
+  currentModel?: Model<Api>;
+}
+
 async function summarizeEntryToEnglish(
   entry: MemoryEntry,
-  config: PiMemoryConfig,
+  options: SummarizeEnglishOptions,
 ): Promise<{ name: string; description: string } | null> {
   const prompt = buildEnglishIndexPrompt(entry);
-  let result: CheapModelResult;
 
   try {
-    result = await callCheapModel(
-      config,
+    const result = await runExtractionPrompt({
+      config: options.config,
       prompt,
-      AbortSignal.timeout(config.timeout ?? 10_000),
-    );
+      signal: AbortSignal.timeout(options.config.timeout ?? 10_000),
+      modelRegistry: options.modelRegistry ?? emptyModelRegistry,
+      currentModel: options.currentModel,
+    });
+
+    if (!result.success || !result.content) {
+      if (result.error) {
+        error("English index translation failed:", result.error);
+      }
+      return null;
+    }
+
+    return parseEnglishIndexResponse(result.content);
   } catch (err) {
     error("English index translation failed", err);
     return null;
   }
-
-  if (!result.success || !result.content) {
-    if (result.error) {
-      error("English index translation failed:", result.error);
-    }
-    return null;
-  }
-
-  return parseEnglishIndexResponse(result.content);
 }

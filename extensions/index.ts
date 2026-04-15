@@ -8,9 +8,9 @@ import type {
 } from "@mariozechner/pi-coding-agent";
 import type { AutocompleteItem } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
-import { type CheapModelResult, callCheapModel } from "../src/cheap-model";
 import { loadConfig } from "../src/config";
 import { extractMemoriesInBackground } from "../src/extraction";
+import { runExtractionPrompt } from "../src/extraction-runner";
 import { debug, error } from "../src/logger";
 import { MemoryManager } from "../src/memory-manager";
 import type {
@@ -22,6 +22,15 @@ import type {
 const memoryManager = new MemoryManager();
 
 let lastUserPrompt = "";
+
+function syncMemoryManagerRuntimeContext(
+  ctx: ExtensionContext | ExtensionCommandContext,
+): void {
+  memoryManager.setRuntimeModelContext({
+    modelRegistry: ctx.modelRegistry,
+    currentModel: ctx.model,
+  });
+}
 
 type ContentBlock =
   | { type: "text"; text: string }
@@ -137,6 +146,7 @@ async function runMemoryExtract(
   ctx: ExtensionContext | ExtensionCommandContext,
   signal?: AbortSignal,
 ): Promise<string> {
+  syncMemoryManagerRuntimeContext(ctx);
   if (ctx.ui?.setStatus) {
     const theme = ctx.ui.theme;
     const spinner = theme.fg("accent", "●");
@@ -165,15 +175,13 @@ async function runMemoryExtract(
   try {
     const config = await loadConfig(ctx.cwd);
 
-    if (!config.apiType || !config.modelId || !config.apiKey) {
-      return "No cheap model configured. Please set piMemory config in settings.json.";
-    }
-
-    const extractionResult: CheapModelResult = await callCheapModel(
+    const extractionResult = await runExtractionPrompt({
       config,
-      extractionPrompt,
-      signal ?? AbortSignal.timeout(config.timeout ?? 10_000),
-    );
+      prompt: extractionPrompt,
+      signal: signal ?? AbortSignal.timeout(config.timeout ?? 10_000),
+      modelRegistry: ctx.modelRegistry,
+      currentModel: ctx.model,
+    });
 
     if (!extractionResult.success) {
       const errorDetail = extractionResult.error
@@ -238,6 +246,7 @@ export default function (pi: ExtensionAPI) {
       ctx: ExtensionContext,
     ): Promise<BeforeAgentStartEventResult | undefined> => {
       lastUserPrompt = event.prompt;
+      syncMemoryManagerRuntimeContext(ctx);
 
       const memoryContext = await memoryManager.getMemoryContext(
         ctx.cwd,
@@ -258,6 +267,7 @@ export default function (pi: ExtensionAPI) {
 
   // ─── Auto-extraction after agent response ───────────────────────────
   pi.on("agent_end", async (event: AgentEndEvent, ctx: ExtensionContext) => {
+    syncMemoryManagerRuntimeContext(ctx);
     const messages = event.messages;
     if (messages.length === 0) return;
 
@@ -314,6 +324,7 @@ export default function (pi: ExtensionAPI) {
       name: Type.Optional(Type.String({ description: "Entry name to read" })),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      syncMemoryManagerRuntimeContext(ctx);
       const scope = params.scope ?? "all";
       const mode = params.mode ?? "index";
 
@@ -436,6 +447,7 @@ export default function (pi: ExtensionAPI) {
       ),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      syncMemoryManagerRuntimeContext(ctx);
       const scope = params.scope ?? "project";
       const type =
         params.type ?? memoryManager.mapCategoryToType(params.category);
@@ -487,6 +499,7 @@ export default function (pi: ExtensionAPI) {
       ),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      syncMemoryManagerRuntimeContext(ctx);
       const scope = params.scope;
       const id = params.id;
       const name = params.name;
@@ -596,6 +609,7 @@ export default function (pi: ExtensionAPI) {
       ];
     },
     handler: async (args, ctx) => {
+      syncMemoryManagerRuntimeContext(ctx);
       const usage =
         "Usage: /memory_view [all|global|project|help]\n" +
         "Examples:\n" +
@@ -638,6 +652,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand("memory_extract", {
     description: "Extract memories with exact rules from the current session",
     handler: async (args, ctx) => {
+      syncMemoryManagerRuntimeContext(ctx);
       if (args.trim()) {
         ctx.ui.notify("Usage: /memory_extract", "error");
         return;

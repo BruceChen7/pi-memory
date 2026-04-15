@@ -226,9 +226,7 @@ export class MemoryStore {
         const legacyContent = await fs.readFile(legacyPath, "utf-8");
         contents.push(legacyContent);
         await fs.unlink(legacyPath);
-      } catch {
-        continue;
-      }
+      } catch {}
     }
     return contents;
   }
@@ -332,7 +330,7 @@ export class MemoryStore {
       }
     }
 
-    const content = lines.join("\n").trimEnd() + "\n";
+    const content = `${lines.join("\n").trimEnd()}\n`;
     await fs.writeFile(this.indexPath, content, "utf-8");
   }
 }
